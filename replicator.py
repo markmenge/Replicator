@@ -293,7 +293,7 @@ class ReplicatorApp(tk.Tk):
         root = ttk.Frame(self)
         root.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
 
-        top = ttk.LabelFrame(root, text="Replicator Prompt")
+        top = ttk.LabelFrame(root, text="Replicator Prompt - Create objects with one click!")
         top.pack(fill=tk.X)
 
         ttk.Label(top, text="Prompt").pack(anchor="w", padx=8, pady=(8, 2))
@@ -303,7 +303,7 @@ class ReplicatorApp(tk.Tk):
 
         opts = ttk.Frame(top)
         opts.pack(fill=tk.X, padx=8, pady=(0, 8))
-        ttk.Checkbutton(opts, text="Print", variable=self.print_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(opts, text="3D Print", variable=self.print_var).pack(side=tk.LEFT)
         ttk.Checkbutton(opts, text="Show Preview", variable=self.show_preview_var).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Checkbutton(opts, text="Visualize G-code in 3D before print", variable=self.visualize_var).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Checkbutton(opts, text="Show Log Details", variable=self.show_log_details_var).pack(side=tk.LEFT, padx=(16, 0))
