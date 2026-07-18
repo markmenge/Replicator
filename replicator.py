@@ -277,7 +277,7 @@ class ReplicatorApp(tk.Tk):
         file_menu.add_command(label="Open OpenSCAD Folder", command=self.open_openscad_folder)
         file_menu.add_command(label="Open Model in OpenSCAD", command=self.open_model_in_openscad)
         file_menu.add_command(label="View Log", command=self.view_log_file)
-        file_menu.add_command(label="Print", command=self.start_print_again)
+        file_menu.add_command(label="3D Print", command=self.start_print_again)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.on_exit)
         menu.add_cascade(label="File", menu=file_menu)
@@ -364,6 +364,17 @@ class ReplicatorApp(tk.Tk):
             "Thumbnail embedded:",
             "Skipping upload.",
             "G-code:",
+            # Upload/print verbose details
+            "Size:",
+            "MD5:",
+            "Uuid:",
+            "HTTP ",
+            "Uploaded file is expected on printer as:",
+            "Connecting to printer at ",
+            "Mainboard ID discovery",
+            "Connected.",
+            "Warning: timed out waiting for printer status push",
+            "start_print sent for ",
         )
         if content.startswith(noisy_prefixes):
             return True
@@ -918,6 +929,10 @@ class ReplicatorApp(tk.Tk):
         gcode_dir = pd["gcode"].resolve()
         base_name = scad_path.stem
         gcode_path = gcode_dir / f"{base_name}.gcode"
+        # Also surface any generated thumbnail PNG for inline preview
+        gen_dir = project_dirs(self.cfg)["generated"].resolve()
+        thumb = gen_dir / f"{base_name}-preview.png"
+        self._log_png_when_exists(thumb)
         if gcode_path.exists():
             self._log(f"G-code: {gcode_path}")
             return gcode_path
@@ -933,6 +948,11 @@ class ReplicatorApp(tk.Tk):
     def _run_print_scad_full(self, scad_path: Path) -> None:
         cmd = self._build_print_scad_command(scad_path, slice_only=False, force_yes=True)
         rc, _out, _err = self._run_command_streaming(cmd, label="print_scad (full print)")
+        # Also surface any generated thumbnail PNG for inline preview
+        gen_dir = project_dirs(self.cfg)["generated"].resolve()
+        base_name = scad_path.stem
+        thumb = gen_dir / f"{base_name}-preview.png"
+        self._log_png_when_exists(thumb)
         if rc != 0:
             raise RuntimeError(f"print_scad full run failed with exit code {rc}")
 
@@ -946,6 +966,19 @@ class ReplicatorApp(tk.Tk):
         self._log("  " + subprocess.list2cmdline(cmd))
         # Launch detached so the matplotlib window can stay interactive (if --out omitted). Here we still detach.
         subprocess.Popen(cmd)
+        # Proactively log the PNG when it appears, so previews show even with details off
+        self._log_png_when_exists(out_png)
+
+    def _log_png_when_exists(self, path: Path, attempts: int = 20, delay_ms: int = 250) -> None:
+        try:
+            if path.exists():
+                self._log(f"Preview PNG: {path}")
+                return
+        except Exception:
+            pass
+        if attempts <= 0:
+            return
+        self.after(delay_ms, lambda: self._log_png_when_exists(path, attempts - 1, delay_ms))
 
     def _on_worker_done(self) -> None:
         self.generate_btn.configure(state=tk.NORMAL)
