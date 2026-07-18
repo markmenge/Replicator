@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "printer": {
+    "host": "192.168.1.156",
+    "auto_level": false,
+    "timelapse": false,
+    "skip_confirmation": false,
+    "mainboard_id": "346c18540107103d00000c0000000000"
+  },
+  "generation": {
+    "api_key": "",
+    "api_key_env": "OPENAI_API_KEY",
+    "api_base": "https://api.openai.com/v1",
+    "model": "gpt-4.1-mini",
+    "temperature": 0.2,
+    "max_tokens": 2500,
+    "preview_size": 768,
+    "output_dir": "build/generated",
+    "name": "",
+    "offline_nameplate": false,
+    "dry_run": false,
+    "whisper_model": "base",
+    "voice_seconds": 8,
+    "open_preview": true
+  },
+  "paths": {
+    "openscad_exe": "C:/Program Files/OpenSCAD/openscad.exe",
+    "orca_exe": "D:/Program Files/OrcaSlicer/orca-slicer.exe",
+    "orca_conf": "C:/Users/Mark/AppData/Roaming/OrcaSlicer/OrcaSlicer.conf",
+    "orca_user_dir": "C:/Users/Mark/AppData/Roaming/OrcaSlicer/user/default",
+    "orca_system_dir": "C:/Users/Mark/AppData/Roaming/OrcaSlicer/system",
+    "build_dir": "build"
+  },
+  "slicing": {
+    "filament_preset": "None",
+    "allow_missing_thumbnail": false,
+    "thumbnail_size": 144,
+    "ensure_heat_order": false,
+    "ensure_prime_strip": false,
+    "ws_port": 3030,
+    "upload_url": "",
+    "sim_stub_slicer": false,
+    "sim": false,
+    "extra_orca_args": []
+  },
+  "ui": {
+    "print_enabled": true,
+    "show_preview": true,
+    "visualize_before_print": true,
+    "last_prompt": "Generate a small quarter size name plate with PEPPER on it"
+  }
+}
