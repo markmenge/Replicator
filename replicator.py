@@ -271,6 +271,7 @@ class ReplicatorApp(tk.Tk):
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(label="Open OpenSCAD Folder", command=self.open_openscad_folder)
         file_menu.add_command(label="Open Model in OpenSCAD", command=self.open_model_in_openscad)
+        file_menu.add_command(label="View Log", command=self.view_log_file)
         file_menu.add_command(label="Print", command=self.start_print_again)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.on_exit)
@@ -456,7 +457,8 @@ class ReplicatorApp(tk.Tk):
             )
             return
 
-        proceed = self._ask_yes_no_ui_thread("Start Print", f"Run print_scad on:\n{scad_path.name} ?")
+        # We are on the UI thread here; prompt directly to avoid deadlock.
+        proceed = messagebox.askyesno("Start Print", f"Run print_scad on:\n{scad_path.name} ?", parent=self)
         if not proceed:
             self._log("Print canceled from File -> Print")
             return
@@ -478,6 +480,20 @@ class ReplicatorApp(tk.Tk):
 
         self.worker = threading.Thread(target=_run_reprint_job, daemon=True)
         self.worker.start()
+
+    def view_log_file(self) -> None:
+        try:
+            # Ensure log file exists to avoid OS error
+            self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.log_file_path.exists():
+                self.log_file_path.write_text("", encoding="utf-8")
+            if os.name == "nt":
+                os.startfile(str(self.log_file_path))
+            else:
+                subprocess.Popen(["xdg-open", str(self.log_file_path)])
+            self._log(f"Opened log file: {self.log_file_path}")
+        except Exception as exc:
+            messagebox.showerror("View Log Error", str(exc), parent=self)
 
     def capture_voice_prompt(self) -> None:
         seconds = int(self.cfg["generation"].get("voice_seconds", 8))
