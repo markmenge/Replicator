@@ -255,6 +255,8 @@ class ReplicatorApp(tk.Tk):
             self.log_file_path = Path("replicator.log")
         # Keep strong references to images inserted in the log to avoid GC
         self._log_images: list[object] = []
+        # Track which image paths we've already previewed to avoid duplicates
+        self._log_image_paths: set[str] = set()
 
         self.prompt_var = tk.StringVar(value=str(self.cfg["ui"].get("last_prompt", "")))
         self.print_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("print_enabled", False)))
@@ -425,6 +427,10 @@ class ReplicatorApp(tk.Tk):
             p_obj = Path(path)
             if not p_obj.exists() or not p_obj.is_file():
                 continue
+            # Skip if we already displayed this image earlier
+            norm_key = str(p_obj.resolve())
+            if norm_key in self._log_image_paths:
+                continue
             # Insert on UI thread (we already are), using Pillow for scaling
             try:
                 from PIL import Image, ImageTk  # type: ignore
@@ -448,6 +454,7 @@ class ReplicatorApp(tk.Tk):
                 self.log_widget.configure(state=tk.DISABLED)
                 # Keep a reference so Tk doesn't GC the image
                 self._log_images.append(photo)
+                self._log_image_paths.add(norm_key)
             except Exception:
                 # Ignore any image decoding/display errors
                 pass
