@@ -17,7 +17,6 @@ from replicator_config import (
     DEFAULT_API_BASE,
     DEFAULT_MODEL,
     DEFAULT_OPENSCAD,
-    DEFAULT_OUTPUT_DIR,
     DEFAULT_PREVIEW_SIZE,
     load_config,
     normalize_optional_text,
@@ -157,7 +156,6 @@ class SettingsDialog(tk.Toplevel):
         self._add_labeled_entry(tab, "Temperature", "generation.temperature", str(gen.get("temperature", 0.2)))
         self._add_labeled_entry(tab, "Max Tokens", "generation.max_tokens", str(gen.get("max_tokens", 2500)))
         self._add_labeled_entry(tab, "Preview Size", "generation.preview_size", str(gen.get("preview_size", DEFAULT_PREVIEW_SIZE)))
-        self._add_labeled_entry(tab, "Output Dir", "generation.output_dir", str(gen.get("output_dir", DEFAULT_OUTPUT_DIR)))
         self._add_labeled_entry(tab, "Name Override", "generation.name", str(gen.get("name", "")))
         self._add_labeled_bool(tab, "Offline Nameplate", "generation.offline_nameplate", bool(gen.get("offline_nameplate", False)))
         self._add_labeled_bool(tab, "Dry Run", "generation.dry_run", bool(gen.get("dry_run", False)))

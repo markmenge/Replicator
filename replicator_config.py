@@ -6,7 +6,6 @@ from pathlib import Path
 
 CONFIG_PATH = Path(__file__).with_name("replicator.json")
 DEFAULT_OPENSCAD = Path(r"C:\Program Files\OpenSCAD\openscad.exe")
-DEFAULT_OUTPUT_DIR = Path(__file__).with_name("build") / "generated"
 DEFAULT_API_BASE = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_PREVIEW_SIZE = 768
@@ -29,7 +28,6 @@ def default_config() -> dict:
             "temperature": 0.2,
             "max_tokens": 2500,
             "preview_size": DEFAULT_PREVIEW_SIZE,
-            "output_dir": str(DEFAULT_OUTPUT_DIR),
             "name": "",
             "offline_nameplate": False,
             "dry_run": False,
@@ -42,7 +40,11 @@ def default_config() -> dict:
             "orca_conf": r"C:/Users/Mark/AppData/Roaming/OrcaSlicer/OrcaSlicer.conf",
             "orca_user_dir": r"C:/Users/Mark/AppData/Roaming/OrcaSlicer/user/default",
             "orca_system_dir": r"C:/Users/Mark/AppData/Roaming/OrcaSlicer/system",
-            "build_dir": "build",
+            "build_dir": "build",  # deprecated; kept for backward compatibility
+        },
+        "projects": {
+            "root_dir": str((Path(__file__).with_name("projects")).resolve()),
+            "name": "default",
         },
         "slicing": {
             "filament_preset": "",
@@ -99,3 +101,13 @@ def normalize_optional_text(value: object) -> str:
     if text.lower() in {"none", "null"}:
         return ""
     return text
+
+
+def project_dirs(cfg: dict) -> dict:
+    root = Path(str(cfg.get("projects", {}).get("root_dir", Path(__file__).with_name("projects").resolve()))).resolve()
+    name = str(cfg.get("projects", {}).get("name", "default")).strip() or "default"
+    base = root / name
+    gen = base / "generated"
+    stl = base / "stl"
+    gcode = base / "gcode"
+    return {"root": root, "name": name, "base": base, "generated": gen, "stl": stl, "gcode": gcode}
