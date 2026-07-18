@@ -22,6 +22,7 @@ from replicator_config import (
     load_config,
     normalize_optional_text,
     save_config,
+    project_dirs,
 )
 from replicator_generation import (
     build_generation_prompt,
@@ -71,6 +72,7 @@ class SettingsDialog(tk.Toplevel):
 
         self._build_generation_tab(notebook)
         self._build_paths_tab(notebook)
+        self._build_project_tab(notebook)
         self._build_print_tab(notebook)
 
         btn_row = ttk.Frame(self)
@@ -94,6 +96,41 @@ class SettingsDialog(tk.Toplevel):
         self.entries[key] = var
         combo = ttk.Combobox(row, textvariable=var, values=options, width=width)
         combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def _build_project_tab(self, notebook: ttk.Notebook) -> None:
+        tab = ttk.Frame(notebook)
+        notebook.add(tab, text="Project")
+
+        pr = self.cfg.get("projects", {})
+        # Root directory with a browse button
+        row_root = ttk.Frame(tab)
+        row_root.pack(fill=tk.X, pady=4)
+        ttk.Label(row_root, text="Project Root", width=26).pack(side=tk.LEFT)
+        var_root = tk.StringVar(value=str(pr.get("root_dir", project_dirs(self.cfg)["root"])))
+        self.entries["projects.root_dir"] = var_root
+        entry_root = ttk.Entry(row_root, textvariable=var_root, width=60)
+        entry_root.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        def _browse_root() -> None:
+            from tkinter.filedialog import askdirectory
+            cur = var_root.get().strip() or str(project_dirs(self.cfg)["root"])
+            selected = askdirectory(initialdir=cur, title="Select Project Root")
+            if selected:
+                var_root.set(selected)
+        ttk.Button(row_root, text="Browse", command=_browse_root).pack(side=tk.LEFT, padx=(6, 0))
+
+        # Project name (required)
+        self._add_labeled_entry(tab, "Project Name", "projects.name", str(pr.get("name", "default")))
+
+        # Open project folder
+        def _open_proj_folder() -> None:
+            pd = project_dirs(self.cfg)
+            base = Path(var_root.get().strip() or str(pd["root"])) / (self.entries["projects.name"].get().strip() or "default")
+            base.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(str(base))
+            else:
+                messagebox.showinfo("Open Folder", str(base))
+        ttk.Button(tab, text="Open Project Folder", command=_open_proj_folder).pack(anchor="w", padx=4, pady=(8, 0))
 
     def _add_labeled_bool(self, parent: ttk.Frame, label: str, key: str, value: bool) -> None:
         row = ttk.Frame(parent)
@@ -186,6 +223,16 @@ class SettingsDialog(tk.Toplevel):
                     self._set_nested(key, int(text_value))
                 else:
                     self._set_nested(key, text_value)
+
+            # Validate required project name
+            proj_name = str(self.cfg.get("projects", {}).get("name", "")).strip()
+            if not proj_name:
+                raise ValueError("Project Name cannot be empty")
+
+            # Ensure project directories exist
+            pd = project_dirs(self.cfg)
+            for d in (pd["base"], pd["generated"], pd["stl"], pd["gcode"]):
+                d.mkdir(parents=True, exist_ok=True)
 
             save_config(CONFIG_PATH, self.cfg)
             self.parent.on_settings_saved()
@@ -302,14 +349,16 @@ class ReplicatorApp(tk.Tk):
         self.destroy()
 
     def _current_scad_path(self) -> Path:
-        output_dir = Path(str(self.cfg["generation"]["output_dir"])).resolve()
+        pd = project_dirs(self.cfg)
+        output_dir = pd["generated"].resolve()
         base_name_cfg = str(self.cfg["generation"].get("name", "")).strip()
         prompt = self.prompt_var.get().strip()
         base_name = slugify(base_name_cfg if base_name_cfg else prompt)
         return output_dir / f"{base_name}.scad"
 
     def open_openscad_folder(self) -> None:
-        output_dir = Path(str(self.cfg["generation"]["output_dir"])).resolve()
+        pd = project_dirs(self.cfg)
+        output_dir = pd["generated"].resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         if os.name == "nt":
             os.startfile(str(output_dir))
@@ -391,7 +440,8 @@ class ReplicatorApp(tk.Tk):
     def _run_pipeline(self, prompt: str) -> None:
         try:
             self._log(f"Prompt: {prompt}")
-            output_dir = Path(str(self.cfg["generation"]["output_dir"])).resolve()
+            pd = project_dirs(self.cfg)
+            output_dir = pd["generated"].resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
 
             base_name_cfg = str(self.cfg["generation"].get("name", "")).strip()
@@ -573,12 +623,24 @@ class ReplicatorApp(tk.Tk):
             cmd.append("--sim-stub-slicer")
 
         paths = cfg["paths"]
+        pd = project_dirs(cfg)
+        gen_dir = pd["generated"].resolve()
+        stl_dir = pd["stl"].resolve()
+        gcode_dir = pd["gcode"].resolve()
+        base_name = scad_path.stem
+        stl_out = stl_dir / f"{base_name}.stl"
+        gcode_out = gcode_dir / f"{base_name}.gcode"
+
         cmd.extend(["--openscad-exe", str(paths.get("openscad_exe", ""))])
         cmd.extend(["--orca-exe", str(paths.get("orca_exe", ""))])
         cmd.extend(["--orca-conf", str(paths.get("orca_conf", ""))])
         cmd.extend(["--orca-user-dir", str(paths.get("orca_user_dir", ""))])
         cmd.extend(["--orca-system-dir", str(paths.get("orca_system_dir", ""))])
-        cmd.extend(["--build-dir", str(paths.get("build_dir", "build"))])
+        # Use generated dir for thumbnails and intermediate previews
+        cmd.extend(["--build-dir", str(gen_dir)])
+        # Explicit STL/G-code outputs in project folders
+        cmd.extend(["--stl-output", str(stl_out)])
+        cmd.extend(["--gcode-output", str(gcode_out)])
 
         if slice_only:
             cmd.append("--skip-upload")
@@ -629,14 +691,16 @@ class ReplicatorApp(tk.Tk):
             if completed.returncode != 0:
                 raise RuntimeError(f"print_scad slice failed with exit code {completed.returncode}")
 
-        build_dir = Path(str(self.cfg["paths"].get("build_dir", "build"))).resolve()
+        pd = project_dirs(self.cfg)
+        gcode_dir = pd["gcode"].resolve()
         base_name = scad_path.stem
-        gcode_path = build_dir / f"{base_name}.gcode"
+        gcode_path = gcode_dir / f"{base_name}.gcode"
         if gcode_path.exists():
             self._log(f"G-code: {gcode_path}")
             return gcode_path
 
-        plate = build_dir / "plate_1.gcode"
+        # Legacy fallback: in case Orca still used default name in prior runs
+        plate = gcode_dir / "plate_1.gcode"
         if plate.exists():
             self._log(f"G-code fallback: {plate}")
             return plate

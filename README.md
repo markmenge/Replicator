@@ -89,7 +89,6 @@ Prompt tips for tokens:
 - Root scripts — printing pipeline and utilities remain at the top level
 
 Notes:
-- The old `build/` directory is deprecated. Use `File -> Migrate Legacy build/ -> Project` to copy historical files into the active project.
 - Set the Projects root and Project name in `Settings -> Project`. Project name is required and defaults to `default`.
 
 ## Troubleshooting: Heat Order, Priming, and Visualization
