@@ -248,6 +248,11 @@ class ReplicatorApp(tk.Tk):
         self.cfg = load_config(CONFIG_PATH)
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.worker: threading.Thread | None = None
+        self._log_lock = threading.Lock()
+        try:
+            self.log_file_path = Path("replicator.log").resolve()
+        except Exception:
+            self.log_file_path = Path("replicator.log")
 
         self.prompt_var = tk.StringVar(value=str(self.cfg["ui"].get("last_prompt", "")))
         self.print_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("print_enabled", False)))
@@ -313,7 +318,56 @@ class ReplicatorApp(tk.Tk):
 
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_queue.put(f"[{timestamp}] {message}")
+        line = f"[{timestamp}] {message}"
+        self.log_queue.put(line)
+        # also append to log file for offline diagnostics
+        try:
+            with self._log_lock:
+                with self.log_file_path.open("a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+        except Exception:
+            # logging must never break UI
+            pass
+
+    def _run_command_streaming(self, cmd: list[str], *, label: str | None = None) -> tuple[int, str, str]:
+        if label:
+            self._log(f"{label} command:")
+        self._log("  " + subprocess.list2cmdline(cmd))
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to start command: {exc}")
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        def _pump(pipe, is_err: bool) -> None:
+            try:
+                assert pipe is not None
+                for raw in iter(pipe.readline, ""):
+                    txt = raw.rstrip("\r\n")
+                    (stderr_chunks if is_err else stdout_chunks).append(txt + "\n")
+                    prefix = "[stderr] " if is_err else ""
+                    self._log(prefix + txt)
+            finally:
+                try:
+                    if pipe is not None:
+                        pipe.close()
+                except Exception:
+                    pass
+
+        t_out = threading.Thread(target=_pump, args=(proc.stdout, False), daemon=True) if proc.stdout else None
+        t_err = threading.Thread(target=_pump, args=(proc.stderr, True), daemon=True) if proc.stderr else None
+        if t_out:
+            t_out.start()
+        if t_err:
+            t_err.start()
+        rc = proc.wait()
+        if t_out:
+            t_out.join()
+        if t_err:
+            t_err.join()
+        return rc, "".join(stdout_chunks), "".join(stderr_chunks)
 
     def _drain_log_queue(self) -> None:
         while True:
@@ -671,15 +725,9 @@ class ReplicatorApp(tk.Tk):
 
     def _run_print_scad_slice_only(self, scad_path: Path) -> Path:
         cmd = self._build_print_scad_command(scad_path, slice_only=True)
-        self._log("print_scad (slice only) command:")
-        self._log("  " + subprocess.list2cmdline(cmd))
-        completed = run_subprocess(cmd)
-        if completed.stdout:
-            self._log(completed.stdout.strip())
-        if completed.stderr:
-            self._log(completed.stderr.strip())
-        if completed.returncode != 0:
-            combined_error = ((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()
+        rc, out, err = self._run_command_streaming(cmd, label="print_scad (slice only)")
+        if rc != 0:
+            combined_error = ((out or "") + "\n" + (err or "")).strip()
             lower_error = combined_error.lower()
             is_slice_export_error = (
                 "found slicing or export error" in lower_error
@@ -698,16 +746,10 @@ class ReplicatorApp(tk.Tk):
                 scad_path.write_text(fixed_code, encoding="utf-8", newline="\n")
                 self._log("Applied printability repair; retrying slice once")
                 retry_cmd = self._build_print_scad_command(scad_path, slice_only=True)
-                self._log("print_scad (slice retry) command:")
-                self._log("  " + subprocess.list2cmdline(retry_cmd))
-                completed = run_subprocess(retry_cmd)
-                if completed.stdout:
-                    self._log(completed.stdout.strip())
-                if completed.stderr:
-                    self._log(completed.stderr.strip())
+                rc, out, err = self._run_command_streaming(retry_cmd, label="print_scad (slice retry)")
 
-            if completed.returncode != 0:
-                raise RuntimeError(f"print_scad slice failed with exit code {completed.returncode}")
+            if rc != 0:
+                raise RuntimeError(f"print_scad slice failed with exit code {rc}")
 
         pd = project_dirs(self.cfg)
         gcode_dir = pd["gcode"].resolve()
@@ -727,15 +769,9 @@ class ReplicatorApp(tk.Tk):
 
     def _run_print_scad_full(self, scad_path: Path) -> None:
         cmd = self._build_print_scad_command(scad_path, slice_only=False, force_yes=True)
-        self._log("print_scad (full print) command:")
-        self._log("  " + subprocess.list2cmdline(cmd))
-        completed = run_subprocess(cmd)
-        if completed.stdout:
-            self._log(completed.stdout.strip())
-        if completed.stderr:
-            self._log(completed.stderr.strip())
-        if completed.returncode != 0:
-            raise RuntimeError(f"print_scad full run failed with exit code {completed.returncode}")
+        rc, _out, _err = self._run_command_streaming(cmd, label="print_scad (full print)")
+        if rc != 0:
+            raise RuntimeError(f"print_scad full run failed with exit code {rc}")
 
     def _run_visualize_gcode(self, gcode_path: Path) -> None:
         script = Path(__file__).with_name("visualize_gcode.py")
