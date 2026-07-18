@@ -262,6 +262,7 @@ class ReplicatorApp(tk.Tk):
         self.print_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("print_enabled", False)))
         self.show_preview_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("show_preview", True)))
         self.visualize_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("visualize_before_print", False)))
+        self.show_log_details_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("show_log_details", True)))
 
         self.status_var = tk.StringVar(value="Ready")
 
@@ -305,6 +306,7 @@ class ReplicatorApp(tk.Tk):
         ttk.Checkbutton(opts, text="Print", variable=self.print_var).pack(side=tk.LEFT)
         ttk.Checkbutton(opts, text="Show Preview", variable=self.show_preview_var).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Checkbutton(opts, text="Visualize G-code in 3D before print", variable=self.visualize_var).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Checkbutton(opts, text="Show Log Details", variable=self.show_log_details_var).pack(side=tk.LEFT, padx=(16, 0))
 
         btns = ttk.Frame(top)
         btns.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -320,6 +322,8 @@ class ReplicatorApp(tk.Tk):
 
         status = ttk.Label(root, textvariable=self.status_var)
         status.pack(fill=tk.X, pady=(8, 0))
+        # Refresh log view when toggling detail visibility
+        self.show_log_details_var.trace_add("write", lambda *_: self._refresh_log_view())
 
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -333,6 +337,39 @@ class ReplicatorApp(tk.Tk):
         except Exception:
             # logging must never break UI
             pass
+        # keep in-memory history for re-filtering on toggle
+        if not hasattr(self, "_log_history"):
+            self._log_history: list[str] = []
+        self._log_history.append(line)
+
+    def _is_noisy_log_line(self, line: str) -> bool:
+        content = line
+        if line.startswith("[") and "] " in line:
+            try:
+                content = line.split("] ", 1)[1]
+            except Exception:
+                content = line
+        noisy_prefixes = (
+            "OpenSCAD preview command:",
+            "OpenSCAD launch command:",
+            "OpenSCAD export command:",
+            "OrcaSlicer command:",
+            "print_scad (slice only) command:",
+            "print_scad (slice retry) command:",
+            "print_scad (full print) command:",
+            "visualize_gcode command:",
+        )
+        if content.startswith(noisy_prefixes):
+            return True
+        if content.startswith("[stderr]"):
+            return True
+        # command lines we print with two leading spaces
+        if content.startswith("  "):
+            return True
+        # slicer trace stamp like: [2026-07-18 10:54:50....] [trace] ...
+        if content.startswith("[") and len(content) > 5 and content[1:5].isdigit():
+            return True
+        return False
 
     def _run_command_streaming(self, cmd: list[str], *, label: str | None = None) -> tuple[int, str, str]:
         if label:
@@ -380,10 +417,12 @@ class ReplicatorApp(tk.Tk):
                 line = self.log_queue.get_nowait()
             except queue.Empty:
                 break
-            self.log_widget.configure(state=tk.NORMAL)
-            self.log_widget.insert(tk.END, line + "\n")
-            self.log_widget.see(tk.END)
-            self.log_widget.configure(state=tk.DISABLED)
+            show_detail = bool(self.show_log_details_var.get())
+            if show_detail or not self._is_noisy_log_line(line):
+                self.log_widget.configure(state=tk.NORMAL)
+                self.log_widget.insert(tk.END, line + "\n")
+                self.log_widget.see(tk.END)
+                self.log_widget.configure(state=tk.DISABLED)
             # Try to inline-display any PNG paths mentioned in this line
             try:
                 self._maybe_insert_inline_images(line)
@@ -391,6 +430,30 @@ class ReplicatorApp(tk.Tk):
                 # Never allow preview failures to impact logging/UI
                 pass
         self.after(100, self._drain_log_queue)
+
+    def _refresh_log_view(self) -> None:
+        # Re-render the log widget based on current filter
+        try:
+            history = getattr(self, "_log_history", [])
+            self.log_widget.configure(state=tk.NORMAL)
+            self.log_widget.delete("1.0", tk.END)
+            self.log_widget.configure(state=tk.DISABLED)
+            # Reset image caches for fresh inserts
+            self._log_images.clear()
+            self._log_image_paths.clear()
+            for line in history:
+                show_detail = bool(self.show_log_details_var.get())
+                if show_detail or not self._is_noisy_log_line(line):
+                    self.log_widget.configure(state=tk.NORMAL)
+                    self.log_widget.insert(tk.END, line + "\n")
+                    self.log_widget.see(tk.END)
+                    self.log_widget.configure(state=tk.DISABLED)
+                try:
+                    self._maybe_insert_inline_images(line)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _maybe_insert_inline_images(self, line: str) -> None:
         # Detect quoted paths and bare tokens that end with .png
@@ -471,6 +534,7 @@ class ReplicatorApp(tk.Tk):
         self.cfg["ui"]["print_enabled"] = bool(self.print_var.get())
         self.cfg["ui"]["show_preview"] = bool(self.show_preview_var.get())
         self.cfg["ui"]["visualize_before_print"] = bool(self.visualize_var.get())
+        self.cfg["ui"]["show_log_details"] = bool(self.show_log_details_var.get())
         save_config(CONFIG_PATH, self.cfg)
         self.status_var.set("Settings saved")
 
