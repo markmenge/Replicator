@@ -264,8 +264,8 @@ class ReplicatorApp(tk.Tk):
         menu = tk.Menu(self)
 
         file_menu = tk.Menu(menu, tearoff=False)
-        file_menu.add_command(label="Generate", command=self.start_generation)
         file_menu.add_command(label="Open OpenSCAD Folder", command=self.open_openscad_folder)
+        file_menu.add_command(label="Open Model in OpenSCAD", command=self.open_model_in_openscad)
         file_menu.add_command(label="Print", command=self.start_print_again)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.on_exit)
@@ -364,6 +364,30 @@ class ReplicatorApp(tk.Tk):
             return
         messagebox.showinfo("Open Folder", f"Open this folder manually:\n{output_dir}")
 
+    def open_model_in_openscad(self) -> None:
+        scad_path = self._current_scad_path()
+        if not scad_path.exists():
+            messagebox.showwarning(
+                "SCAD Not Found",
+                f"No generated SCAD found for current prompt or name override.\nExpected: {scad_path.name}\n\nGenerate first, or set Name Override to match an existing model.",
+                parent=self,
+            )
+            return
+
+        openscad_exe = Path(str(self.cfg["paths"].get("openscad_exe", "")))
+        if not openscad_exe.exists():
+            messagebox.showerror("OpenSCAD Missing", f"OpenSCAD executable not found: {openscad_exe}", parent=self)
+            return
+
+        try:
+            cmd = [str(openscad_exe), str(scad_path)]
+            self._log("Open OpenSCAD command:")
+            self._log("  " + subprocess.list2cmdline(cmd))
+            subprocess.Popen(cmd)
+            self.status_var.set("Opened in OpenSCAD")
+        except Exception as exc:
+            messagebox.showerror("OpenSCAD Error", str(exc), parent=self)
+
     def start_print_again(self) -> None:
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("Busy", "A generation/print job is already running.")
@@ -403,20 +427,33 @@ class ReplicatorApp(tk.Tk):
     def capture_voice_prompt(self) -> None:
         seconds = int(self.cfg["generation"].get("voice_seconds", 8))
         model_name = str(self.cfg["generation"].get("whisper_model", "base")).strip() or "base"
-        try:
-            self.status_var.set(f"Listening for {seconds}s...")
-            self._log(f"Whisper listening for {seconds}s with model '{model_name}'")
-            text = transcribe_prompt_with_whisper(seconds=seconds, model_name=model_name)
-            if not text:
-                messagebox.showinfo("Voice Input", "No speech detected.")
-                self.status_var.set("Ready")
-                return
-            self.prompt_var.set(text)
-            self._log(f"Voice prompt captured: {text}")
-            self.status_var.set("Ready")
-        except Exception as exc:
-            self.status_var.set("Ready")
-            messagebox.showerror("Voice Input Error", str(exc))
+
+        # Update UI immediately so the user sees the listening state.
+        self.status_var.set(f"Listening for {seconds}s...")
+        self._log(f"Whisper listening for {seconds}s with model '{model_name}'")
+        self.update_idletasks()
+
+        def _voice_worker() -> None:
+            try:
+                text = transcribe_prompt_with_whisper(seconds=seconds, model_name=model_name)
+                if not text:
+                    self.after(0, lambda: (
+                        self.status_var.set("Ready"),
+                        messagebox.showinfo("Voice Input", "No speech detected.", parent=self)
+                    ))
+                    return
+                def _apply_text() -> None:
+                    self.prompt_var.set(text)
+                    self._log(f"Voice prompt captured: {text}")
+                    self.status_var.set("Ready")
+                self.after(0, _apply_text)
+            except Exception as exc:
+                self.after(0, lambda: (
+                    self.status_var.set("Ready"),
+                    messagebox.showerror("Voice Input Error", str(exc), parent=self)
+                ))
+
+        threading.Thread(target=_voice_worker, daemon=True).start()
 
     def start_generation(self) -> None:
         if self.worker and self.worker.is_alive():

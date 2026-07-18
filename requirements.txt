@@ -1,0 +1,13 @@
+# Core runtime deps for Replicator GUI + tools
+numpy
+sounddevice
+openai-whisper
+matplotlib
+requests
+websockets
+
+# Optional/local: pycentauri client library used by print commands
+# If you have the repo adjacent to this one, install editable like:
+#   pip install -e ..\..\pycentauri
+# Or install from wherever you host it (e.g., a VCS URL)
+# pycentauri
