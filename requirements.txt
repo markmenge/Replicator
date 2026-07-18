@@ -5,6 +5,7 @@ openai-whisper
 matplotlib
 requests
 websockets
+Pillow
 
 # Optional/local: pycentauri client library used by print commands
 # If you have the repo adjacent to this one, install editable like:

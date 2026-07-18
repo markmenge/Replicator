@@ -253,6 +253,8 @@ class ReplicatorApp(tk.Tk):
             self.log_file_path = Path("replicator.log").resolve()
         except Exception:
             self.log_file_path = Path("replicator.log")
+        # Keep strong references to images inserted in the log to avoid GC
+        self._log_images: list[object] = []
 
         self.prompt_var = tk.StringVar(value=str(self.cfg["ui"].get("last_prompt", "")))
         self.print_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("print_enabled", False)))
@@ -380,7 +382,75 @@ class ReplicatorApp(tk.Tk):
             self.log_widget.insert(tk.END, line + "\n")
             self.log_widget.see(tk.END)
             self.log_widget.configure(state=tk.DISABLED)
+            # Try to inline-display any PNG paths mentioned in this line
+            try:
+                self._maybe_insert_inline_images(line)
+            except Exception:
+                # Never allow preview failures to impact logging/UI
+                pass
         self.after(100, self._drain_log_queue)
+
+    def _maybe_insert_inline_images(self, line: str) -> None:
+        # Detect quoted paths and bare tokens that end with .png
+        import re
+        candidates: list[str] = []
+        # quoted "...png" or '...png'
+        for m in re.finditer(r"[\"']([^\"']+?\.png)[\"']", line, flags=re.IGNORECASE):
+            candidates.append(m.group(1))
+        # bare tokens ending with .png (no spaces inside)
+        for token in line.split():
+            if token.lower().endswith(".png"):
+                # strip trailing punctuation commonly present in logs
+                t = token.strip().strip(",.;")
+                candidates.append(t)
+
+        if not candidates:
+            return
+
+        # Resolve and insert unique existing paths
+        seen: set[str] = set()
+        for raw in candidates:
+            path = raw
+            try:
+                p = Path(path)
+                if not p.is_absolute():
+                    # Resolve relative to current working directory of app
+                    p = (Path.cwd() / p).resolve()
+                path = str(p)
+            except Exception:
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            p_obj = Path(path)
+            if not p_obj.exists() or not p_obj.is_file():
+                continue
+            # Insert on UI thread (we already are), using Pillow for scaling
+            try:
+                from PIL import Image, ImageTk  # type: ignore
+            except Exception:
+                # Pillow not installed; skip inline preview
+                continue
+            try:
+                img = Image.open(p_obj)
+                # Scale to max width 420 px, preserve aspect ratio
+                max_w = 420
+                if img.width > max_w:
+                    ratio = max_w / float(img.width)
+                    new_size = (max_w, max(1, int(img.height * ratio)))
+                    img = img.resize(new_size, Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self.log_widget.configure(state=tk.NORMAL)
+                self.log_widget.insert(tk.END, "\n")
+                self.log_widget.image_create(tk.END, image=photo)
+                self.log_widget.insert(tk.END, f"\n{p_obj}\n")
+                self.log_widget.see(tk.END)
+                self.log_widget.configure(state=tk.DISABLED)
+                # Keep a reference so Tk doesn't GC the image
+                self._log_images.append(photo)
+            except Exception:
+                # Ignore any image decoding/display errors
+                pass
 
     def open_settings(self) -> None:
         SettingsDialog(self)
