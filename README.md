@@ -42,6 +42,19 @@ python replicator.py
 
 4) In Settings → Paths, set your OpenSCAD and OrcaSlicer locations if they aren’t auto‑detected.
 
+## API Key
+
+Replicator uses an OpenAI‑compatible API for model generation.
+
+- Set your key in Settings → Generation → API Key, or provide it via environment variable `OPENAI_API_KEY` (the default).
+- To set it for your current PowerShell session:
+
+```powershell
+$env:OPENAI_API_KEY = "sk-your-key"
+```
+
+- Optional: If you use an OpenAI‑compatible provider, set Settings → Generation → API Base accordingly. You can also change the environment variable name via Settings → Generation → API Key Env (defaults to `OPENAI_API_KEY`).
+
 ## Using Replicator
 
 1) Enter a prompt (or click Voice Input)
