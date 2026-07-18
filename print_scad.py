@@ -408,6 +408,8 @@ def main() -> int:
         has_thumbnail = gcode_has_thumbnail(gcode_path)
         if not has_thumbnail:
             render_thumbnail_png(scad_path, thumbnail_path, openscad_exe, args.thumbnail_size, dry_run=False)
+            # Emit the PNG path so GUI logs can show an inline preview
+            print(f"Thumbnail PNG: {thumbnail_path}")
             embed_thumbnail_in_gcode(gcode_path, thumbnail_path, args.thumbnail_size)
             has_thumbnail = gcode_has_thumbnail(gcode_path)
         print(f"Thumbnail embedded: {'yes' if has_thumbnail else 'no'}")

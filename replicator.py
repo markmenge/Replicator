@@ -861,10 +861,13 @@ class ReplicatorApp(tk.Tk):
 
     def _run_visualize_gcode(self, gcode_path: Path) -> None:
         script = Path(__file__).with_name("visualize_gcode.py")
-        cmd = [sys.executable, str(script), str(gcode_path), "--view", "3d"]
+        # Also save a PNG so the Log can show an inline preview.
+        out_png = gcode_path.with_suffix("")
+        out_png = out_png.parent / (out_png.stem + "-preview3d.png")
+        cmd = [sys.executable, str(script), str(gcode_path), "--view", "3d", "--out", str(out_png)]
         self._log("visualize_gcode command:")
         self._log("  " + subprocess.list2cmdline(cmd))
-        # Launch detached so the matplotlib window can stay interactive.
+        # Launch detached so the matplotlib window can stay interactive (if --out omitted). Here we still detach.
         subprocess.Popen(cmd)
 
     def _on_worker_done(self) -> None:
