@@ -79,13 +79,18 @@ Prompt tips for tokens:
 - Ask for `thicker features` and `no fragile details`.
 - For raised/debossed symbols, request depth around `0.8mm`.
 
-## Project Structure (in progress)
+## Project Structure
 
-- `research/` — reverse-engineering utilities and artifacts:
-  - `research/scan_printer_js.py`
-  - `archive/` (legacy assets remain here for now)
-- `build/` — generated STL, G-code, and previews
-- Root scripts — printing pipeline and utilities remain at the top level for now
+- `projects/` — per-project outputs (default project name is `default`)
+  - `projects/<name>/generated/` — SCAD, preview PNG, metadata JSON
+  - `projects/<name>/stl/` — exported STL files
+  - `projects/<name>/gcode/` — sliced G-code files
+- `research/` — reverse-engineering utilities and artifacts (legacy assets remain under `research/archive/`)
+- Root scripts — printing pipeline and utilities remain at the top level
+
+Notes:
+- The old `build/` directory is deprecated. Use `File -> Migrate Legacy build/ -> Project` to copy historical files into the active project.
+- Set the Projects root and Project name in `Settings -> Project`. Project name is required and defaults to `default`.
 
 ## Troubleshooting: Heat Order, Priming, and Visualization
 
