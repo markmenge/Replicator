@@ -358,6 +358,12 @@ class ReplicatorApp(tk.Tk):
             "print_scad (slice retry) command:",
             "print_scad (full print) command:",
             "visualize_gcode command:",
+            # Additional high-verbosity operational lines to hide
+            "SCAD:",
+            "Auto-detected OrcaSlicer settings",
+            "Thumbnail embedded:",
+            "Skipping upload.",
+            "G-code:",
         )
         if content.startswith(noisy_prefixes):
             return True
