@@ -75,7 +75,6 @@ python replicator.py
   - Preview size (used for thumbnails)
 - Paths
   - OpenSCAD EXE, OrcaSlicer EXE, Orca config + user/system dirs
-  - Build Dir (used for intermediates)
 - Print / Slicing
   - Printer host, auto‑level, timelapse, skip confirmation
   - Filament preset, thumbnail size, prime strip / heat‑order helpers

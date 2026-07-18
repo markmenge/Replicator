@@ -172,7 +172,6 @@ class SettingsDialog(tk.Toplevel):
         self._add_labeled_entry(tab, "Orca Config", "paths.orca_conf", str(paths.get("orca_conf", "")))
         self._add_labeled_entry(tab, "Orca User Dir", "paths.orca_user_dir", str(paths.get("orca_user_dir", "")))
         self._add_labeled_entry(tab, "Orca System Dir", "paths.orca_system_dir", str(paths.get("orca_system_dir", "")))
-        self._add_labeled_entry(tab, "Build Dir", "paths.build_dir", str(paths.get("build_dir", "build")))
 
     def _build_print_tab(self, notebook: ttk.Notebook) -> None:
         tab = ttk.Frame(notebook)
@@ -276,6 +275,7 @@ class ReplicatorApp(tk.Tk):
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(label="Open OpenSCAD Folder", command=self.open_openscad_folder)
         file_menu.add_command(label="Open Model in OpenSCAD", command=self.open_model_in_openscad)
+        file_menu.add_command(label="Open OrcaSlicer", command=self.open_orcaslicer)
         file_menu.add_command(label="View Log", command=self.view_log_file)
         file_menu.add_command(label="3D Print", command=self.start_print_again)
         file_menu.add_separator()
@@ -304,7 +304,7 @@ class ReplicatorApp(tk.Tk):
         opts = ttk.Frame(top)
         opts.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Checkbutton(opts, text="3D Print", variable=self.print_var).pack(side=tk.LEFT)
-        ttk.Checkbutton(opts, text="Show Preview", variable=self.show_preview_var).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Checkbutton(opts, text="Show Preview in OpenSCAD", variable=self.show_preview_var).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Checkbutton(opts, text="Visualize G-code in 3D before print", variable=self.visualize_var).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Checkbutton(opts, text="Show Log Details", variable=self.show_log_details_var).pack(side=tk.LEFT, padx=(16, 0))
 
@@ -364,6 +364,11 @@ class ReplicatorApp(tk.Tk):
             "Thumbnail embedded:",
             "Skipping upload.",
             "G-code:",
+            "Preview PNG:",
+            "G-code preflight summary",
+            "Uploading to:",
+            "File:",
+            "Current status:",
             # Upload/print verbose details
             "Size:",
             "MD5:",
@@ -377,6 +382,11 @@ class ReplicatorApp(tk.Tk):
             "start_print sent for ",
         )
         if content.startswith(noisy_prefixes):
+            return True
+        # Hide typical JSON/dict status lines and empty lines when details are off
+        if content.startswith("{\"code\"") or content.startswith("{'Cmd':"):
+            return True
+        if not content.strip():
             return True
         if content.startswith("[stderr]"):
             return True
@@ -529,7 +539,15 @@ class ReplicatorApp(tk.Tk):
                 self.log_widget.configure(state=tk.NORMAL)
                 self.log_widget.insert(tk.END, "\n")
                 self.log_widget.image_create(tk.END, image=photo)
-                self.log_widget.insert(tk.END, f"\n{p_obj}\n")
+                # Only add a path caption when details are shown
+                try:
+                    show_detail = bool(self.show_log_details_var.get())
+                except Exception:
+                    show_detail = False
+                if show_detail:
+                    self.log_widget.insert(tk.END, f"\n{p_obj}\n")
+                else:
+                    self.log_widget.insert(tk.END, "\n")
                 self.log_widget.see(tk.END)
                 self.log_widget.configure(state=tk.DISABLED)
                 # Keep a reference so Tk doesn't GC the image
@@ -587,6 +605,35 @@ class ReplicatorApp(tk.Tk):
             )
             return
         self._open_in_openscad(scad_path)
+
+    def open_orcaslicer(self) -> None:
+        try:
+            orca_exe = Path(str(self.cfg["paths"].get("orca_exe", "")))
+            if not orca_exe.exists():
+                messagebox.showerror("OrcaSlicer Missing", f"OrcaSlicer executable not found: {orca_exe}", parent=self)
+                return
+
+            # If there is an STL for the current model, open it directly; otherwise just launch OrcaSlicer
+            pd = project_dirs(self.cfg)
+            base_name = self._current_scad_path().stem
+            stl_path = pd["stl"].resolve() / f"{base_name}.stl"
+
+            try:
+                if stl_path.exists():
+                    cmd = [str(orca_exe), str(stl_path)]
+                    self._log("Launching OrcaSlicer with STL:")
+                    self._log("  " + subprocess.list2cmdline(cmd))
+                    subprocess.Popen(cmd)
+                else:
+                    cmd = [str(orca_exe)]
+                    self._log("Launching OrcaSlicer (no STL found for current model)")
+                    self._log("  " + subprocess.list2cmdline(cmd))
+                    subprocess.Popen(cmd)
+                self.status_var.set("Opened OrcaSlicer")
+            except Exception as exc:
+                messagebox.showerror("OrcaSlicer Error", str(exc), parent=self)
+        except Exception as exc:
+            messagebox.showerror("OrcaSlicer Error", str(exc), parent=self)
 
     def _open_in_openscad(self, scad_path: Path) -> None:
         openscad_exe = Path(str(self.cfg["paths"].get("openscad_exe", "")))

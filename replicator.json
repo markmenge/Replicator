@@ -15,12 +15,12 @@
     "temperature": 0.2,
     "max_tokens": 2500,
     "preview_size": 768,
-    "output_dir": "build/generated",
     "name": "",
     "offline_nameplate": false,
     "dry_run": false,
     "whisper_model": "base",
     "voice_seconds": 8,
+    "output_dir": "build/generated",
     "open_preview": true
   },
   "paths": {
@@ -31,8 +31,12 @@
     "orca_system_dir": "C:/Users/Mark/AppData/Roaming/OrcaSlicer/system",
     "build_dir": "build"
   },
+  "projects": {
+    "root_dir": "D:\\Proj\\python\\replicator\\projects",
+    "name": "pepper"
+  },
   "slicing": {
-    "filament_preset": "None",
+    "filament_preset": "",
     "allow_missing_thumbnail": false,
     "thumbnail_size": 144,
     "ensure_heat_order": false,
@@ -47,6 +51,7 @@
     "print_enabled": true,
     "show_preview": true,
     "visualize_before_print": true,
-    "last_prompt": "Generate a small quarter size name plate with PEPPER on it"
+    "last_prompt": "Generate a small 2 cm by 5 cm by 2 mm openscad name plate that says \"PEPPER\". Make sure the font is a 8.",
+    "show_log_details": false
   }
 }

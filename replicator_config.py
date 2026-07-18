@@ -40,7 +40,6 @@ def default_config() -> dict:
             "orca_conf": r"C:/Users/Mark/AppData/Roaming/OrcaSlicer/OrcaSlicer.conf",
             "orca_user_dir": r"C:/Users/Mark/AppData/Roaming/OrcaSlicer/user/default",
             "orca_system_dir": r"C:/Users/Mark/AppData/Roaming/OrcaSlicer/system",
-            "build_dir": "build",  # deprecated; kept for backward compatibility
         },
         "projects": {
             "root_dir": str((Path(__file__).with_name("projects")).resolve()),
