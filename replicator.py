@@ -373,15 +373,16 @@ class ReplicatorApp(tk.Tk):
                 parent=self,
             )
             return
+        self._open_in_openscad(scad_path)
 
+    def _open_in_openscad(self, scad_path: Path) -> None:
         openscad_exe = Path(str(self.cfg["paths"].get("openscad_exe", "")))
         if not openscad_exe.exists():
             messagebox.showerror("OpenSCAD Missing", f"OpenSCAD executable not found: {openscad_exe}", parent=self)
             return
-
         try:
             cmd = [str(openscad_exe), str(scad_path)]
-            self._log("Open OpenSCAD command:")
+            self._log("OpenSCAD launch command:")
             self._log("  " + subprocess.list2cmdline(cmd))
             subprocess.Popen(cmd)
             self.status_var.set("Opened in OpenSCAD")
@@ -482,7 +483,7 @@ class ReplicatorApp(tk.Tk):
             base_name_cfg = str(self.cfg["generation"].get("name", "")).strip()
             base_name = slugify(base_name_cfg if base_name_cfg else prompt)
             scad_path = output_dir / f"{base_name}.scad"
-            preview_path = output_dir / f"{base_name}-preview.png"
+            preview_path = output_dir / f"{base_name}-preview.png"  # legacy; no longer used for Show Preview
             metadata_path = output_dir / f"{base_name}.json"
 
             generation_prompt = build_generation_prompt(prompt)
@@ -536,27 +537,9 @@ class ReplicatorApp(tk.Tk):
             self._log(f"SCAD: {scad_path}")
 
             if bool(self.show_preview_var.get()):
-                try:
-                    self._run_openscad_preview(scad_path, preview_path)
-                except RuntimeError as exc:
-                    message = str(exc)
-                    if "Parser error" not in message:
-                        raise
-
-                    self._log("OpenSCAD parser error detected; requesting one-shot syntax repair...")
-                    fixed_code = request_scad_syntax_fix(
-                        scad_code=scad_path.read_text(encoding="utf-8", errors="replace"),
-                        error_text=message,
-                        api_key=resolve_api_key(self.cfg),
-                        api_base=str(self.cfg["generation"]["api_base"]),
-                        model=str(self.cfg["generation"]["model"]),
-                    )
-                    scad_path.write_text(fixed_code, encoding="utf-8", newline="\n")
-                    self._log("Applied syntax repair; retrying OpenSCAD preview")
-                    self._run_openscad_preview(scad_path, preview_path)
-
-                if os.name == "nt":
-                    os.startfile(str(preview_path))
+                # Instead of rendering a PNG and opening it in Paint,
+                # launch the model directly in OpenSCAD for interactive preview/edit.
+                self._open_in_openscad(scad_path)
 
             if bool(self.visualize_var.get()) or bool(self.print_var.get()):
                 gcode_path = self._run_print_scad_slice_only(scad_path)
