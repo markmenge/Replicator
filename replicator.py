@@ -662,6 +662,8 @@ class ReplicatorApp(tk.Tk):
             )
             return
 
+        messagebox.showinfo("Blocker", "You have to edit this code to enable automated printing! It will not run as-is. It may cause unintended behavior, and is not safe.")
+        exit(0)
         # We are on the UI thread here; prompt directly to avoid deadlock.
         proceed = messagebox.askyesno("Start Print", f"Run print_scad on:\n{scad_path.name} ?", parent=self)
         if not proceed:
