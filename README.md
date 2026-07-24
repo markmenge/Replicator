@@ -2,7 +2,7 @@
 
 # Replicator — One‑click prompt‑to‑print
 
-Create 3D objects from natural language or voice, preview in OpenSCAD, visualize toolpaths, and 3D print — all from a friendly desktop app.
+Create 3D objects from natural language or voice, preview in OpenSCAD, visualize toolpaths, and 3D print — all from a friendly desktop app. This is a work-in-progress, there aren't any safe guards in place, so for now just consider this a proof of concept project.
 
 ![Replicator UI](Replicator.png)
 
