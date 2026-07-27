@@ -5,8 +5,10 @@ import os
 import re
 import urllib.error
 import urllib.request
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
+import base64
 
 
 SYSTEM_PROMPT = """You generate valid OpenSCAD models from plain-English requests.
@@ -25,7 +27,215 @@ Requirements for scad_code:
 - Use ASCII only
 - Do not wrap the code in markdown fences
 - Do not assign geometry nodes to variables (for example `shape = cube(...)` is invalid in OpenSCAD)
+- Prefer lathe-style shapes with rotate_extrude() for revolved profiles when suitable (e.g., chess pieces)
+- Keep the model resting on the build plane with its base at z=0 (avoid center=true on base solids)
+- Avoid tiny disconnected ornaments; union parts into one contiguous manifold solid
 """
+
+
+def _uses_max_completion_tokens(model: str) -> bool:
+    m = (model or "").lower()
+    return m.startswith("gpt-5") or m.startswith("o4")
+
+
+def _supports_temperature(model: str) -> bool:
+    m = (model or "").lower()
+    # GPT-5 family currently enforces default temperature only; omit or use 1
+    return not (m.startswith("gpt-5") or m.startswith("o4"))
+
+
+def _message_text_from_choice(choice: dict) -> str:
+    try:
+        msg = choice.get("message", {})
+    except Exception:
+        msg = {}
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    # Some models return content as a list of parts
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                if "text" in part and isinstance(part["text"], str):
+                    parts.append(part["text"])
+                elif part.get("type") in ("text", "output_text") and isinstance(part.get("content"), str):
+                    parts.append(str(part.get("content")))
+        if parts:
+            return "\n".join(parts)
+    # Fallback empty
+    return ""
+
+
+def _responses_aggregate_text(data: dict) -> str:
+    # Try common fields first
+    if isinstance(data, dict):
+        if isinstance(data.get("output_text"), str) and data.get("output_text").strip():
+            return str(data.get("output_text"))
+        # Some variants nest under 'response' or 'output'
+        for key in ("response", "output", "outputs"):
+            block = data.get(key)
+            if isinstance(block, dict):
+                # Single response object
+                txt = _responses_aggregate_text(block)
+                if txt:
+                    return txt
+            if isinstance(block, list):
+                parts: list[str] = []
+                for item in block:
+                    if not isinstance(item, dict):
+                        continue
+                    # Item may have 'content' which is a list
+                    content = item.get("content")
+                    if isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict):
+                                if "text" in c and isinstance(c["text"], str):
+                                    parts.append(c["text"])
+                                elif c.get("type") in ("text", "output_text") and isinstance(c.get("content"), str):
+                                    parts.append(str(c.get("content")))
+                                elif isinstance(c.get("text"), dict) and isinstance(c["text"].get("value"), str):
+                                    parts.append(c["text"]["value"])  # some SDKs use text.value
+                if parts:
+                    return "\n".join(parts)
+    # Fallback: no obvious structured text
+    return ""
+
+
+def _openai_client(api_key: str, api_base: str):
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("OpenAI SDK not installed. Run: pip install openai") from exc
+    # OpenAI SDK accepts base_url (root that includes /v1)
+    client = OpenAI(api_key=api_key, base_url=api_base.rstrip("/"))
+    return client
+
+
+def _encode_image_to_data_uri(path: Path) -> str:
+    data = path.read_bytes()
+    b64 = base64.b64encode(data).decode("ascii")
+    return f"data:image/png;base64,{b64}"
+
+
+def rate_images_with_vision(
+    *,
+    prompt: str,
+    image_paths: list[Path],
+    api_key: str,
+    api_base: str,
+    model: str,
+    max_tokens: int = 600,
+    ref_image_paths: list[Path] | None = None,
+) -> dict:
+    """Rate candidate images against the prompt using a JSON rubric.
+
+    Returns a dict like {"score": float, "pros": [...], "cons": [...], "edit_suggestions": [...]}.
+    """
+    if not image_paths:
+        return {"score": 50.0, "pros": [], "cons": ["No images provided"], "edit_suggestions": []}
+
+    data_uris = []
+    for p in image_paths:
+        try:
+            if p.exists():
+                data_uris.append(_encode_image_to_data_uri(p))
+        except Exception:
+            continue
+    if not data_uris:
+        return {"score": 50.0, "pros": [], "cons": ["Images missing"], "edit_suggestions": []}
+
+    rubric = (
+        "Grade 0–100 with this rubric: "
+        "Shape fidelity to description (0–45), Proportion/structure plausibility (0–25), "
+        "Printability cues visible (flat base, sturdy features) (0–15), Aesthetics/cleanliness (0–15). "
+        "If one or more reference images are provided, compare the candidate images to the reference and "
+        "favor closer visual similarity in silhouette and proportions. "
+        "Return a JSON object only with keys: score (number), pros (array of strings), "
+        "cons (array of strings), edit_suggestions (array of strings)."
+    )
+
+    is_gpt5 = _uses_max_completion_tokens(model)
+    if is_gpt5:
+        client = _openai_client(api_key, api_base)
+        content_blocks = [{"type": "input_text", "text": rubric + "\n\nPrompt: " + prompt}]
+        # Attach reference images first (if any), followed by candidate images
+        if ref_image_paths:
+            for p in ref_image_paths:
+                try:
+                    if p.exists():
+                        content_blocks.append({"type": "input_image", "image_url": _encode_image_to_data_uri(p)})
+                except Exception:
+                    pass
+        for uri in data_uris:
+            content_blocks.append({"type": "input_image", "image_url": uri})
+        messages = [
+            {"role": "system", "content": "You are a strict JSON grader. Output only JSON."},
+            {"role": "user", "content": content_blocks},
+        ]
+        kwargs = {
+            "model": model,
+            "input": messages,
+            "max_output_tokens": max_tokens + 200,
+            "reasoning": {"effort": "low"},
+        }
+        try:
+            resp = client.responses.create(**kwargs)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise RuntimeError(f"Vision rating failed: {exc}") from exc
+        try:
+            content = getattr(resp, "output_text", None) or _responses_aggregate_text(resp.to_dict())  # type: ignore[attr-defined]
+        except Exception:
+            content = ""
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("Vision model did not return content")
+        return extract_json_object(content)
+    else:
+        # Chat Completions with vision content blocks
+        url = api_base.rstrip("/") + "/chat/completions"
+        user_content = [{"type": "text", "text": rubric + "\n\nPrompt: " + prompt}]
+        if ref_image_paths:
+            for p in ref_image_paths:
+                try:
+                    if p.exists():
+                        user_content.append({"type": "image_url", "image_url": {"url": _encode_image_to_data_uri(p)}})
+                except Exception:
+                    pass
+        for uri in data_uris:
+            user_content.append({"type": "image_url", "image_url": {"url": uri}})
+        payload = {
+            "model": model,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": "You are a strict JSON grader. Output only JSON."},
+                {"role": "user", "content": user_content},
+            ],
+        }
+        if _supports_temperature(model):
+            payload["temperature"] = 0
+        if _uses_max_completion_tokens(model):
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
+
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=120) as response:
+            raw = response.read().decode("utf-8")
+        data = json.loads(raw)
+        choice0 = data["choices"][0]
+        content = _message_text_from_choice(choice0)
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("Vision model did not return content")
+        return extract_json_object(content)
 
 SCAD_FIX_SYSTEM_PROMPT = """You repair OpenSCAD source code.
 
@@ -83,6 +293,20 @@ def looks_like_token_prompt(prompt: str) -> bool:
     return any(keyword in normalized for keyword in keywords)
 
 
+def looks_like_chess_piece_prompt(prompt: str) -> bool:
+    normalized = prompt.lower()
+    keywords = (
+        "chess",
+        "rook",
+        "bishop",
+        "knight",
+        "queen",
+        "king",
+        "pawn",
+    )
+    return any(keyword in normalized for keyword in keywords)
+
+
 def extract_requested_name(prompt: str) -> str | None:
     quoted = re.search(r'"([A-Za-z0-9 _.-]{1,40})"', prompt)
     if quoted:
@@ -100,6 +324,19 @@ def extract_requested_name(prompt: str) -> str | None:
 
 
 def build_generation_prompt(prompt: str) -> str:
+    if looks_like_chess_piece_prompt(prompt):
+        scaffold = """
+
+Chess-piece guidance:
+- Use rotate_extrude() over a 2D profile to form the primary body; keep the base flat on z=0.
+- Default total height: 40–50 mm unless specified; choose proportional radii.
+- Maintain minimum wall/feature thickness ≥ 1.2 mm; avoid fragile overhangs.
+- Produce one contiguous manifold solid. Use union() and avoid floating parts.
+- For a rook: cylindrical tower with thicker base, debossed or difference() crenellations kept chunky.
+- For knight/bishop/queen/king: favor simple printable silhouettes; avoid thin spikes.
+- Keep parameters at top for height, radii, and feature sizes.
+"""
+    return prompt + scaffold
     if looks_like_name_plate_prompt(prompt):
         requested_name = extract_requested_name(prompt) or "NAME"
         scaffold = f"""
@@ -118,7 +355,7 @@ Name-plate guidance:
 - The text should read exactly: {requested_name}
 - Keep the result as one printable solid.
 """
-        return prompt + scaffold
+    return prompt + scaffold
 
     if looks_like_token_prompt(prompt):
         scaffold = """
@@ -198,10 +435,32 @@ def extract_json_object(text: str) -> dict:
     if start == -1 or end == -1 or end <= start:
         raise RuntimeError("Model response was not valid JSON")
 
+    raw_obj = text[start:end + 1]
     try:
-        data = json.loads(text[start:end + 1])
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Model response could not be parsed as JSON: {exc}") from exc
+        data = json.loads(raw_obj)
+    except json.JSONDecodeError:
+        # Heuristic fix for invalid backslash escapes inside large string fields like scad_code
+        def _fix_invalid_escapes(s: str) -> str:
+            import re
+            # Replace backslashes that are not part of a valid JSON escape sequence with escaped backslashes
+            # Valid escapes: \\ \" \/ \b \f \n \r \t \uXXXX
+            def repl(m: re.Match[str]) -> str:
+                bs, nxt = m.group(1), m.group(2)
+                if nxt in ['\\', '"', '/', 'b', 'f', 'n', 'r', 't']:
+                    return bs + '\\' + nxt  # already valid pattern matched once; keep as-is by doubling? no — don't change
+                if nxt == 'u':
+                    return bs + '\\u'
+                # otherwise, escape it
+                return bs + '\\' + nxt
+            # Use a regex that finds a single backslash not followed by a valid escape char
+            fixed = re.sub(r"(\\)([^\\\"/bfnrtu])", repl, s)
+            return fixed
+
+        fixed_obj = _fix_invalid_escapes(raw_obj)
+        try:
+            data = json.loads(fixed_obj)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Model response could not be parsed as JSON: {exc}") from exc
 
     if not isinstance(data, dict):
         raise RuntimeError("Model response JSON was not an object")
@@ -246,43 +505,147 @@ def request_scad_from_openai(
     temperature: float,
     max_tokens: int,
 ) -> dict:
-    url = api_base.rstrip("/") + "/chat/completions"
-    payload = {
-        "model": model,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
-        "messages": [
+    # Prefer Chat Completions for non-GPT-5; use SDK Responses API for GPT-5 family
+    is_gpt5 = _uses_max_completion_tokens(model)
+    if is_gpt5:
+        # SDK path
+        client = _openai_client(api_key, api_base)
+        messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-    }
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+            {"role": "user", "content": prompt + "\n\nRespond with a single JSON object only."},
+        ]
+        kwargs = {"model": model, "input": messages}
+        # Token limits for Responses API (pad to reduce truncation from reasoning)
+        kwargs["max_output_tokens"] = max_tokens + 1000
+        # Hint to minimize reasoning verbosity
+        kwargs["reasoning"] = {"effort": "low"}
+        # Some deployments reject non-default temperature for GPT-5; omit to use default
+        if _supports_temperature(model):
+            kwargs["temperature"] = temperature
 
+        try:
+            resp = client.responses.create(**kwargs)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise RuntimeError(f"OpenAI API (responses) request failed: {exc}") from exc
+
+        try:
+            # SDK convenience property
+            content = getattr(resp, "output_text", None) or ""
+            if not content:
+                # Fallback to dict walk
+                d = resp.to_dict()  # type: ignore[attr-defined]
+                content = _responses_aggregate_text(d)
+                if not content:
+                    # Write debug payload to inspect response shape
+                    try:
+                        Path("replicator_api_debug.json").write_text(json.dumps(d, indent=2), encoding="utf-8")
+                    except Exception:
+                        pass
+        except Exception:
+            content = ""
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("OpenAI API response did not include text content")
+        try:
+            return extract_json_object(content)
+        except Exception:
+            try:
+                Path("replicator_api_raw.txt").write_text(str(content), encoding="utf-8")
+            except Exception:
+                pass
+            raise
+
+    # Legacy Chat Completions path for non-GPT-5
+    url = api_base.rstrip("/") + "/chat/completions"
+    base_messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+    if is_gpt5:
+        payload = {
+            "model": model,
+            "input": base_messages,
+        }
+        # Responses API token field
+        payload["max_output_tokens"] = max_tokens
+        if _supports_temperature(model):
+            payload["temperature"] = temperature
+    else:
+        payload = {
+            "model": model,
+            "response_format": {"type": "json_object"},
+            "messages": base_messages,
+        }
+        if _supports_temperature(model):
+            payload["temperature"] = temperature
+        if _uses_max_completion_tokens(model):
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    def _do_request(pl: dict) -> dict:
+        body = json.dumps(pl).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    # First attempt: JSON mode
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            raw = response.read().decode("utf-8")
+        data = _do_request(payload)
+        if is_gpt5:
+            content = _responses_aggregate_text(data)
+            if content.strip():
+                return extract_json_object(content)
+        else:
+            choice0 = data["choices"][0]
+            content = _message_text_from_choice(choice0)
+            if isinstance(content, str) and content.strip():
+                return extract_json_object(content)
     except urllib.error.HTTPError as exc:
         details = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"OpenAI API request failed: HTTP {exc.code}: {details}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"OpenAI API request failed: {exc}") from exc
+    except Exception:
+        # Fall through to retry
+        pass
 
-    try:
-        data = json.loads(raw)
-        content = data["choices"][0]["message"]["content"]
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("OpenAI API response did not match expected shape") from exc
+    # Fallback: remove response_format and insist on JSON in the user message
+    if is_gpt5:
+        fallback_payload = {
+            "model": model,
+            "input": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt + "\n\nRespond with a single JSON object only."},
+            ],
+        }
+        fallback_payload["max_output_tokens"] = max_tokens
+        if _supports_temperature(model):
+            fallback_payload["temperature"] = temperature
+    else:
+        fallback_payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt + "\n\nRespond with a single JSON object only."},
+            ],
+        }
+        if _supports_temperature(model):
+            fallback_payload["temperature"] = temperature
+        if _uses_max_completion_tokens(model):
+            fallback_payload["max_completion_tokens"] = max_tokens
+        else:
+            fallback_payload["max_tokens"] = max_tokens
 
+    data = _do_request(fallback_payload)
+    if is_gpt5:
+        content = _responses_aggregate_text(data)
+    else:
+        choice0 = data["choices"][0]
+        content = _message_text_from_choice(choice0)
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError("OpenAI API response did not include text content")
     return extract_json_object(content)
@@ -307,24 +670,61 @@ def request_scad_syntax_fix(
     api_base: str,
     model: str,
 ) -> str:
-    url = api_base.rstrip("/") + "/chat/completions"
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "max_tokens": 3500,
-        "response_format": {"type": "json_object"},
-        "messages": [
+    is_gpt5 = _uses_max_completion_tokens(model)
+    if is_gpt5:
+        client = _openai_client(api_key, api_base)
+        messages = [
             {"role": "system", "content": SCAD_FIX_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "Fix this OpenSCAD parser error while preserving model intent.\n\n"
-                    f"Error:\n{error_text}\n\n"
-                    f"SCAD source:\n{scad_code}"
-                ),
-            },
-        ],
-    }
+            {"role": "user", "content": (
+                "Fix this OpenSCAD parser error while preserving model intent.\n\n"
+                f"Error:\n{error_text}\n\n"
+                f"SCAD source:\n{scad_code}"
+            )},
+        ]
+        kwargs = {"model": model, "input": messages, "max_output_tokens": 4500, "reasoning": {"effort": "low"}}
+        if _supports_temperature(model):
+            kwargs["temperature"] = 0
+        try:
+            resp = client.responses.create(**kwargs)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise RuntimeError(f"OpenAI syntax-fix (responses) failed: {exc}") from exc
+        try:
+            content = getattr(resp, "output_text", None) or _responses_aggregate_text(resp.to_dict())  # type: ignore[attr-defined]
+        except Exception:
+            content = ""
+        fixed_payload = extract_json_object(str(content))
+        fixed_code = fixed_payload.get("scad_code")
+        if not isinstance(fixed_code, str) or not fixed_code.strip():
+            raise RuntimeError("Syntax-fix response did not include scad_code")
+        cleaned = fixed_code.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```[a-zA-Z0-9_+-]*\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+            cleaned = cleaned.strip()
+        return cleaned + "\n"
+    else:
+        url = api_base.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": model,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": SCAD_FIX_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Fix this OpenSCAD parser error while preserving model intent.\n\n"
+                        f"Error:\n{error_text}\n\n"
+                        f"SCAD source:\n{scad_code}"
+                    ),
+                },
+            ],
+        }
+        if _supports_temperature(model):
+            payload["temperature"] = 0
+        if _uses_max_completion_tokens(model):
+            payload["max_completion_tokens"] = 3500
+        else:
+            payload["max_tokens"] = 3500
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -347,10 +747,13 @@ def request_scad_syntax_fix(
 
     try:
         data = json.loads(raw)
-        content = data["choices"][0]["message"]["content"]
+        if is_gpt5:
+            content = _responses_aggregate_text(data)
+        else:
+            choice0 = data["choices"][0]
+            content = _message_text_from_choice(choice0)
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("Syntax-fix response did not match expected shape") from exc
-
     fixed_payload = extract_json_object(str(content))
     fixed_code = fixed_payload.get("scad_code")
     if not isinstance(fixed_code, str) or not fixed_code.strip():
@@ -373,24 +776,61 @@ def request_scad_printability_fix(
     api_base: str,
     model: str,
 ) -> str:
-    url = api_base.rstrip("/") + "/chat/completions"
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "max_tokens": 3500,
-        "response_format": {"type": "json_object"},
-        "messages": [
+    is_gpt5 = _uses_max_completion_tokens(model)
+    if is_gpt5:
+        client = _openai_client(api_key, api_base)
+        messages = [
             {"role": "system", "content": SCAD_PRINT_FIX_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "Fix this OpenSCAD model so slicers can export/slice it.\n\n"
-                    f"Slicer error:\n{error_text}\n\n"
-                    f"SCAD source:\n{scad_code}"
-                ),
-            },
-        ],
-    }
+            {"role": "user", "content": (
+                "Fix this OpenSCAD model so slicers can export/slice it.\n\n"
+                f"Slicer error:\n{error_text}\n\n"
+                f"SCAD source:\n{scad_code}"
+            )},
+        ]
+        kwargs = {"model": model, "input": messages, "max_output_tokens": 4500, "reasoning": {"effort": "low"}}
+        if _supports_temperature(model):
+            kwargs["temperature"] = 0
+        try:
+            resp = client.responses.create(**kwargs)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise RuntimeError(f"OpenAI printability-fix (responses) failed: {exc}") from exc
+        try:
+            content = getattr(resp, "output_text", None) or _responses_aggregate_text(resp.to_dict())  # type: ignore[attr-defined]
+        except Exception:
+            content = ""
+        fixed_payload = extract_json_object(str(content))
+        fixed_code = fixed_payload.get("scad_code")
+        if not isinstance(fixed_code, str) or not fixed_code.strip():
+            raise RuntimeError("Printability-fix response did not include scad_code")
+        cleaned = fixed_code.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```[a-zA-Z0-9_+-]*\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+            cleaned = cleaned.strip()
+        return cleaned + "\n"
+    else:
+        url = api_base.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": model,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": SCAD_PRINT_FIX_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Fix this OpenSCAD model so slicers can export/slice it.\n\n"
+                        f"Slicer error:\n{error_text}\n\n"
+                        f"SCAD source:\n{scad_code}"
+                    ),
+                },
+            ],
+        }
+        if _supports_temperature(model):
+            payload["temperature"] = 0
+        if _uses_max_completion_tokens(model):
+            payload["max_completion_tokens"] = 3500
+        else:
+            payload["max_tokens"] = 3500
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -413,10 +853,13 @@ def request_scad_printability_fix(
 
     try:
         data = json.loads(raw)
-        content = data["choices"][0]["message"]["content"]
+        if is_gpt5:
+            content = _responses_aggregate_text(data)
+        else:
+            choice0 = data["choices"][0]
+            content = _message_text_from_choice(choice0)
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("Printability-fix response did not match expected shape") from exc
-
     fixed_payload = extract_json_object(str(content))
     fixed_code = fixed_payload.get("scad_code")
     if not isinstance(fixed_code, str) or not fixed_code.strip():

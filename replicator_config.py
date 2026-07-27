@@ -61,6 +61,8 @@ def default_config() -> dict:
             "show_preview": True,
             "visualize_before_print": False,
             "last_prompt": "",
+            "advanced_modeling": False,
+            "ref_image": "",
         },
     }
 

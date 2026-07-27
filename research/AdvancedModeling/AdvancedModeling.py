@@ -93,6 +93,7 @@ class AdvancedModeler:
         self.model = str(self.cfg["generation"].get("model"))
         self.base_temp = float(self.cfg["generation"].get("temperature", 0.2))
         self.max_tokens = int(self.cfg["generation"].get("max_tokens", 2500))
+        self._ref_images: List[Path] = []
 
     # ------------------------ Public API ------------------------
     def generate(
@@ -108,6 +109,7 @@ class AdvancedModeler:
         budget = budget or Budget()
         engines = engines or Engines()
         callbacks = callbacks or []
+        self._ref_images = list(ref_images or [])
 
         # Workspace paths
         pd = project_dirs(self.cfg)
@@ -302,6 +304,7 @@ class AdvancedModeler:
                     api_base=self.api_base,
                     model=self.model,
                     max_tokens=600,
+                    ref_image_paths=self._ref_images if self._ref_images else None,
                 )
                 vision_score = float(rating.get("score", 50.0))
                 vlm_details = rating

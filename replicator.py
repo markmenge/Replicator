@@ -302,6 +302,8 @@ class ReplicatorApp(tk.Tk):
         self.show_preview_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("show_preview", True)))
         self.visualize_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("visualize_before_print", False)))
         self.show_log_details_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("show_log_details", True)))
+        self.advanced_modeling_var = tk.BooleanVar(value=bool(self.cfg["ui"].get("advanced_modeling", False)))
+        self.ref_image_path_var = tk.StringVar(value=str(self.cfg["ui"].get("ref_image", "")))
 
         self.status_var = tk.StringVar(value="Ready")
 
@@ -372,6 +374,24 @@ class ReplicatorApp(tk.Tk):
         ttk.Checkbutton(opts, text="Show Preview in OpenSCAD", variable=self.show_preview_var).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Checkbutton(opts, text="Visualize G-code in 3D before print", variable=self.visualize_var).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Checkbutton(opts, text="Show Log Details", variable=self.show_log_details_var).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Checkbutton(opts, text="Advanced Modeling", variable=self.advanced_modeling_var).pack(side=tk.LEFT, padx=(16, 0))
+
+        # Reference image picker (optional, used by Advanced Modeling vision scoring)
+        img_row = ttk.Frame(top)
+        img_row.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Label(img_row, text="Reference Image (optional):").pack(side=tk.LEFT)
+        ref_entry = ttk.Entry(img_row, textvariable=self.ref_image_path_var, width=60)
+        ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 6))
+
+        def _browse_ref_image() -> None:
+            from tkinter.filedialog import askopenfilename
+            sel = askopenfilename(title="Select Reference Image", filetypes=[
+                ("Images", ".png .jpg .jpeg .webp .bmp"),
+                ("All files", "*.*"),
+            ])
+            if sel:
+                self.ref_image_path_var.set(sel)
+        ttk.Button(img_row, text="Browse", command=_browse_ref_image).pack(side=tk.LEFT)
 
         btns = ttk.Frame(top)
         btns.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -635,6 +655,8 @@ class ReplicatorApp(tk.Tk):
         self.cfg["ui"]["show_preview"] = bool(self.show_preview_var.get())
         self.cfg["ui"]["visualize_before_print"] = bool(self.visualize_var.get())
         self.cfg["ui"]["show_log_details"] = bool(self.show_log_details_var.get())
+        self.cfg["ui"]["advanced_modeling"] = bool(self.advanced_modeling_var.get())
+        self.cfg["ui"]["ref_image"] = str(self.ref_image_path_var.get()).strip()
         save_config(CONFIG_PATH, self.cfg)
         self.status_var.set("Settings saved")
 
@@ -846,6 +868,66 @@ class ReplicatorApp(tk.Tk):
                 self._log(f"Would write SCAD: {scad_path}")
                 self._log(f"Would render preview: {preview_path}")
                 return
+
+            # Advanced Modeling branch: generate multiple candidates with iteration and optional ref image
+            if bool(self.advanced_modeling_var.get()):
+                try:
+                    from research.AdvancedModeling.AdvancedModeling import AdvancedModeler, Constraints, Budget, Engines  # type: ignore
+                except Exception as exc:
+                    self._log(f"ERROR: AdvancedModeling module not available: {exc}; falling back to single-shot generation")
+                else:
+                    ref_img_raw = str(self.ref_image_path_var.get()).strip()
+                    ref_imgs = [Path(ref_img_raw)] if ref_img_raw else None
+                    self._log("Advanced Modeling enabled: running iterative candidate generation")
+                    am = AdvancedModeler(self.cfg)
+                    # Light-weight defaults to improve poor rook quality without huge latency
+                    bud = Budget(max_iters=2, candidates_per_iter=3, target_score=72.0, beam_width=2)
+                    res = am.generate(description=prompt, ref_images=ref_imgs, constraints=Constraints(), budget=bud, engines=Engines())
+                    best_scad = res.best.source_path.read_text(encoding="utf-8", errors="replace")
+
+                    # Choose concise base name for artifacts
+                    if base_name_cfg:
+                        base_name = slugify(base_name_cfg)
+                    else:
+                        base_from_prompt = slugify(prompt)
+                        base_name = ("advanced_" + base_from_prompt) if base_from_prompt else temp_base
+                    if len(base_name) > 80:
+                        base_name = base_name[:80].rstrip("-_ ")
+
+                    scad_path = output_dir / f"{base_name}.scad"
+                    preview_path = output_dir / f"{base_name}-preview.png"
+                    metadata_path = output_dir / f"{base_name}.json"
+
+                    scad_path.write_text(best_scad, encoding="utf-8", newline="\n")
+                    write_metadata(metadata_path, prompt=prompt, model=str(self.cfg["generation"]["model"]), title=base_name, description="AdvancedModeling best candidate")
+
+                    # Log any candidate preview images for inline display
+                    try:
+                        for v in getattr(res.best, "views", []) or []:
+                            self._log(f"Preview PNG: {v}")
+                    except Exception:
+                        pass
+
+                    self._log(f"SCAD: {scad_path}")
+
+                    # Continue with preview/slice/print flow below as usual
+                    if bool(self.show_preview_var.get()):
+                        self._open_in_openscad(scad_path)
+
+                    if bool(self.visualize_var.get()) or bool(self.print_var.get()):
+                        gcode_path = self._run_print_scad_slice_only(scad_path)
+                        if bool(self.visualize_var.get()):
+                            self._run_visualize_gcode(gcode_path)
+
+                        if bool(self.print_var.get()):
+                            proceed = self._ask_yes_no_ui_thread("Start Print", "Proceed with upload and start print?")
+                            if proceed:
+                                self._run_print_scad_full(scad_path)
+                            else:
+                                self._log("Print canceled after visualization")
+
+                    self._log("Done")
+                    return
 
             if bool(self.cfg["generation"].get("offline_nameplate", False)) and looks_like_name_plate_prompt(prompt):
                 requested_name = extract_requested_name(prompt) or "NAME"
