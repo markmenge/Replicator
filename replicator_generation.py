@@ -466,6 +466,35 @@ def extract_json_object(text: str) -> dict:
     return data
 
 
+def _extract_scad_fallback(text: str) -> dict | None:
+    """Best-effort SCAD extractor when the model didn't return valid JSON.
+
+    Looks for a fenced code block and returns a minimal payload if found.
+    """
+    import re as _re
+    m = _re.search(r"```(?:openscad|scad)?\s*([\s\S]*?)```", text, flags=_re.IGNORECASE)
+    if m:
+        code = m.group(1).strip()
+        if code:
+            return {"title": "generated_model", "description": "", "scad_code": code}
+    # Heuristic: grab long blocks containing common OpenSCAD tokens if no fences
+    tokens = ("rotate_extrude", "linear_extrude", "union(", "difference(", "cube(", "cylinder(", "sphere(")
+    if any(t in text for t in tokens):
+        # Extract lines between first and last semicolon burst as a crude block
+        try:
+            lines = text.splitlines()
+            idxs = [i for i, ln in enumerate(lines) if any(t in ln for t in tokens)]
+            if idxs:
+                i0 = max(0, idxs[0] - 3)
+                i1 = min(len(lines), idxs[-1] + 50)
+                snippet = "\n".join(lines[i0:i1]).strip()
+                if snippet:
+                    return {"title": "generated_model", "description": "", "scad_code": snippet}
+        except Exception:
+            pass
+    return None
+
+
 def extract_scad_code(payload: dict) -> tuple[str, str, str]:
     title = str(payload.get("title", "generated_model")).strip() or "generated_model"
     description = str(payload.get("description", "")).strip()
@@ -567,6 +596,11 @@ def request_scad_from_openai(
                 _dbg("API: wrote replicator_api_raw.txt fallback")
             except Exception:
                 pass
+            # Fallback: try to salvage SCAD from fences
+            fallback = _extract_scad_fallback(str(content))
+            if fallback:
+                _dbg("API: salvaged SCAD from non-JSON content")
+                return fallback
             raise
 
     # Legacy Chat Completions path for non-GPT-5
@@ -667,7 +701,19 @@ def request_scad_from_openai(
     if not isinstance(content, str) or not content.strip():
         _dbg("API: empty content from fallback path")
         raise RuntimeError("OpenAI API response did not include text content")
-    return extract_json_object(content)
+    try:
+        return extract_json_object(content)
+    except Exception:
+        try:
+            Path("replicator_api_raw.txt").write_text(str(content), encoding="utf-8")
+            _dbg("API: wrote replicator_api_raw.txt fallback (chat path)")
+        except Exception:
+            pass
+        fallback = _extract_scad_fallback(str(content))
+        if fallback:
+            _dbg("API: salvaged SCAD from non-JSON content (chat path)")
+            return fallback
+        raise
 
 
 def write_metadata(metadata_path: Path, *, prompt: str, model: str, title: str, description: str) -> None:
