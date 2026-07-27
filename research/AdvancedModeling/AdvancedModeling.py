@@ -9,6 +9,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 import subprocess
+import hashlib
 
 # Reuse existing replicator utilities
 from replicator_config import CONFIG_PATH, load_config, project_dirs
@@ -116,7 +117,7 @@ class AdvancedModeler:
         base = Path(pd["base"]).resolve()
         adv_root = base / "generated_advanced"
         adv_root.mkdir(parents=True, exist_ok=True)
-        slug = slugify(description)
+        slug = self._safe_slug(description)
         work_dir = adv_root / slug
         work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -202,6 +203,14 @@ class AdvancedModeler:
         (work_dir / "context.json").write_text(json.dumps(context, indent=2), encoding="utf-8")
 
         return result
+
+    def _safe_slug(self, text: str, max_len: int = 40) -> str:
+        base = slugify(text)
+        if len(base) <= max_len:
+            return base
+        h = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:8]
+        trimmed = base[: max_len - 9].rstrip("-_")
+        return f"{trimmed}-{h}"
 
     # ------------------------ Internal helpers ------------------------
     def _generate_openscad_candidates(

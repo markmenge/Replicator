@@ -336,8 +336,8 @@ Chess-piece guidance:
 - For knight/bishop/queen/king: favor simple printable silhouettes; avoid thin spikes.
 - Keep parameters at top for height, radii, and feature sizes.
 """
-    return prompt + scaffold
-    if looks_like_name_plate_prompt(prompt):
+        return prompt + scaffold
+    elif looks_like_name_plate_prompt(prompt):
         requested_name = extract_requested_name(prompt) or "NAME"
         scaffold = f"""
 
@@ -355,9 +355,8 @@ Name-plate guidance:
 - The text should read exactly: {requested_name}
 - Keep the result as one printable solid.
 """
-    return prompt + scaffold
-
-    if looks_like_token_prompt(prompt):
+        return prompt + scaffold
+    elif looks_like_token_prompt(prompt):
         scaffold = """
 
 Game-token guidance:
@@ -371,8 +370,8 @@ Game-token guidance:
 - Use simple primitive operations (union/difference/hull/minkowski) and top-level parameters.
 """
         return prompt + scaffold
-
-    return prompt
+    else:
+        return prompt
 
 
 def postprocess_name_plate_scad(scad_code: str) -> str:
