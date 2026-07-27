@@ -49,6 +49,46 @@ OPENAI_MODEL_SUGGESTIONS = [
     "gpt-4.1-mini",
     "o4-mini",
 ]
+
+# Curated advanced-model presets. Each is (label, prompt_text).
+ADVANCED_MODEL_PRESETS: list[tuple[str, str]] = [
+    (
+        "Chess rook – printable, 45mm, flat base",
+        "Generate a 45 mm tall 3D-printable chess rook with a flat base suitable for FDM printing. Use a revolved side profile for the body and add crown cuts. Wall thickness >= 1.2 mm; avoid thin unsupported features. Output only valid OpenSCAD code.",
+    ),
+    (
+        "Chess bishop – printable, 45mm, flat base",
+        "Generate a 45 mm tall 3D-printable chess bishop with a flat base. Use rotate_extrude() for the body and a clean diagonal head cut. Stable proportions and printable details. Output only OpenSCAD.",
+    ),
+    (
+        "Chess knight – printable, stylized",
+        "Generate a stylized 3D-printable chess knight using a composed primitive silhouette (no sculpting). Build a printable base and a simplified head profile via linear_extrude() and boolean operations. Keep overhangs reasonable. Output only OpenSCAD.",
+    ),
+    (
+        "Involute spur gear – module 2, 20 teeth, 5mm bore",
+        "Generate a printable involute spur gear using a trusted parametric gear module (or approximate cleanly) with module=2, z=20, pressure_angle=20°, bore=5 mm, thickness 8 mm. Include fillets/chamfers suitable for FDM. Output OpenSCAD only.",
+    ),
+    (
+        "NEMA17 motor mount – plate + ribs",
+        "Generate a printable NEMA17 motor mount: 60x60 mm plate, 4x M3 pattern (31 mm square), center shaft opening 22 mm, plate thickness 4 mm, add two 3 mm ribs. Parametric. Output OpenSCAD only.",
+    ),
+    (
+        "Electronics enclosure – 100x60x30mm with lid",
+        "Generate a two-part parametric electronics enclosure: outer 100x60x30 mm, 2 mm wall, internal standoffs for M2.5, lid with 1 mm step lip and 4 countersunk M3 holes. Output OpenSCAD only.",
+    ),
+    (
+        "Bearing holder – 608ZZ press fit",
+        "Generate a printable 608ZZ bearing holder: bearing OD 22 mm, width 7 mm, allow -0.1 mm press fit, flange and mounting holes (2x M3). Parametric. Output OpenSCAD only.",
+    ),
+    (
+        "L-bracket – 50x50x25, 3mm thick",
+        "Generate a printable L-bracket: legs 50x50 mm, width 20 mm, thickness 3 mm, filleted inside corner (radius ~6 mm), 2x M4 holes on each leg with reasonable edge distances. Output OpenSCAD only.",
+    ),
+    (
+        "GT2 pulley – 20T, 5mm bore",
+        "Generate a printable GT2 pulley: 20 teeth, 5 mm bore, 7 mm width, include hub and grub-screw flat (no threads). Use parametric tooth profile or simplified but printable approximation. Output OpenSCAD only.",
+    ),
+]
 def run_subprocess(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, capture_output=True, text=True, cwd=str(cwd) if cwd else None)
 
@@ -296,7 +336,32 @@ class ReplicatorApp(tk.Tk):
         top = ttk.LabelFrame(root, text="Replicator Prompt - Create objects with one click!")
         top.pack(fill=tk.X)
 
-        ttk.Label(top, text="Prompt").pack(anchor="w", padx=8, pady=(8, 2))
+        # Preset picker + freeform prompt row
+        row = ttk.Frame(top)
+        row.pack(fill=tk.X, padx=8, pady=(8, 2))
+        ttk.Label(row, text="Prompt").pack(side=tk.LEFT)
+
+        # Advanced presets dropdown; selecting a preset injects the prompt text
+        ttk.Label(row, text="Advanced Model Presets:").pack(side=tk.LEFT, padx=(16, 4))
+        self.preset_var = tk.StringVar(value="")
+        preset_labels = [label for (label, _prompt) in ADVANCED_MODEL_PRESETS]
+        self.preset_combo = ttk.Combobox(row, textvariable=self.preset_var, values=preset_labels, width=48, state="readonly")
+        self.preset_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def _on_preset_selected(event: object | None = None) -> None:
+            sel = self.preset_var.get().strip()
+            for label, preset_prompt in ADVANCED_MODEL_PRESETS:
+                if label == sel:
+                    self.prompt_var.set(preset_prompt)
+                    # Move focus to entry for quick edits
+                    try:
+                        entry.focus_set()
+                    except Exception:
+                        pass
+                    break
+        self.preset_combo.bind("<<ComboboxSelected>>", _on_preset_selected)
+
+        # Freeform prompt entry under the presets row
         entry = ttk.Entry(top, textvariable=self.prompt_var)
         entry.pack(fill=tk.X, padx=8, pady=(0, 8))
         entry.focus_set()
@@ -757,11 +822,13 @@ class ReplicatorApp(tk.Tk):
             output_dir = pd["generated"].resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
 
+            # Defer choosing the final base name until after we have a title
             base_name_cfg = str(self.cfg["generation"].get("name", "")).strip()
-            base_name = slugify(base_name_cfg if base_name_cfg else prompt)
-            scad_path = output_dir / f"{base_name}.scad"
-            preview_path = output_dir / f"{base_name}-preview.png"  # legacy; no longer used for Show Preview
-            metadata_path = output_dir / f"{base_name}.json"
+            temp_base = slugify(base_name_cfg if base_name_cfg else prompt)
+            # Temporary paths; may be overridden once title is known
+            scad_path = output_dir / f"{temp_base}.scad"
+            preview_path = output_dir / f"{temp_base}-preview.png"  # legacy; no longer used for Show Preview
+            metadata_path = output_dir / f"{temp_base}.json"
 
             generation_prompt = build_generation_prompt(prompt)
             if generation_prompt != prompt:
@@ -803,6 +870,20 @@ class ReplicatorApp(tk.Tk):
                     max_tokens=int(self.cfg["generation"]["max_tokens"]),
                 )
                 title, description, scad_code = extract_scad_code(payload)
+
+            # Choose a concise, safe base name to avoid Windows path limits
+            if base_name_cfg:
+                base_name = slugify(base_name_cfg)
+            else:
+                base_from_title = slugify(title) if title else ""
+                base_name = base_from_title if base_from_title else temp_base
+            # Hard limit to avoid excessively long file names on Windows
+            if len(base_name) > 80:
+                base_name = base_name[:80].rstrip("-_ ")
+
+            scad_path = output_dir / f"{base_name}.scad"
+            preview_path = output_dir / f"{base_name}-preview.png"
+            metadata_path = output_dir / f"{base_name}.json"
 
             scad_code = maybe_postprocess_scad(prompt, scad_code)
             scad_path.write_text(scad_code, encoding="utf-8", newline="\n")
