@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, asdict
+from typing import Callable
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 import subprocess
@@ -87,7 +88,7 @@ class Result:
 
 
 class AdvancedModeler:
-    def __init__(self, cfg: Optional[dict] = None) -> None:
+    def __init__(self, cfg: Optional[dict] = None, *, logger: Optional[Callable[[str], None]] = None, verbose: bool = False) -> None:
         self.cfg = cfg or load_config(CONFIG_PATH)
         self.api_key = resolve_api_key(self.cfg)
         self.api_base = str(self.cfg["generation"].get("api_base"))
@@ -95,6 +96,15 @@ class AdvancedModeler:
         self.base_temp = float(self.cfg["generation"].get("temperature", 0.2))
         self.max_tokens = int(self.cfg["generation"].get("max_tokens", 2500))
         self._ref_images: List[Path] = []
+        self._logger: Optional[Callable[[str], None]] = logger
+        self._verbose: bool = bool(verbose)
+
+    def _log(self, msg: str) -> None:
+        if self._logger:
+            try:
+                self._logger(msg)
+            except Exception:
+                pass
 
     # ------------------------ Public API ------------------------
     def generate(
@@ -120,6 +130,9 @@ class AdvancedModeler:
         slug = self._safe_slug(description)
         work_dir = adv_root / slug
         work_dir.mkdir(parents=True, exist_ok=True)
+        self._log(f"AM: work_dir = {work_dir}")
+        if self._ref_images:
+            self._log(f"AM: reference images: {len(self._ref_images)}")
 
         history: List[Dict[str, Any]] = []
         population: List[Candidate] = []
@@ -129,21 +142,25 @@ class AdvancedModeler:
             iter_dir.mkdir(parents=True, exist_ok=True)
 
             # 1) Generate candidates (OpenSCAD only for now)
-            new_candidates = self._generate_openscad_candidates(
-                description, constraints, budget.candidates_per_iter, iter_dir
-            )
+            self._log(f"AM: iter {it}: generating {budget.candidates_per_iter} candidates (temp base {self.base_temp})")
+            new_candidates = self._generate_openscad_candidates(description, constraints, budget.candidates_per_iter, iter_dir)
 
             # 2) Render/export for each candidate (non-fatal per-candidate)
             for cand in new_candidates:
                 try:
+                    if self._verbose:
+                        self._log(f"AM: export {cand.id}: OpenSCAD -> STL + image")
                     self._export_openscad(cand)
                 except Exception:
                     cand.stl_path = None
                     cand.views = []
+                    self._log(f"AM: export {cand.id} failed; continuing")
 
             # 3) Evaluate (geometry + placeholder vision). If poor geometry, attempt one repair pass.
             for cand in new_candidates:
                 self._evaluate_candidate(cand, description)
+                if self._verbose:
+                    self._log(f"AM: eval {cand.id}: vision={cand.metrics.vision:.1f} geo={cand.metrics.geo*100.0:.1f} total={cand.score:.1f}")
                 needs_fix = (cand.metrics.geo < 0.8) or any(
                     k in (cand.metrics.penalties or {}) for k in [
                         "empty_mesh", "zero_volume", "degenerate_bbox", "disconnected_bodies"
@@ -151,7 +168,11 @@ class AdvancedModeler:
                 )
                 if needs_fix:
                     try:
+                        if self._verbose:
+                            self._log(f"AM: {cand.id}: attempting one-shot printability fix")
                         self._one_shot_printability_fix(cand, description)
+                        if self._verbose:
+                            self._log(f"AM: {cand.id}: re-evaluated vision={cand.metrics.vision:.1f} geo={cand.metrics.geo*100.0:.1f} total={cand.score:.1f}")
                     except Exception:
                         pass
 
@@ -218,18 +239,25 @@ class AdvancedModeler:
     ) -> List[Candidate]:
         candidates: List[Candidate] = []
         prompt = self._build_advanced_prompt(description, constraints)
+        if self._verbose:
+            self._log("AM: prompt prepared for generation")
 
         for i in range(n):
             # Small temperature jitter per candidate
             temp = max(0.0, min(1.0, self.base_temp + (i - (n - 1) / 2) * 0.15))
-            payload = request_scad_from_openai(
-                prompt=build_generation_prompt(prompt),
-                api_key=self.api_key,
-                api_base=self.api_base,
-                model=self.model,
-                temperature=temp,
-                max_tokens=self.max_tokens,
-            )
+            try:
+                payload = request_scad_from_openai(
+                    prompt=build_generation_prompt(prompt),
+                    api_key=self.api_key,
+                    api_base=self.api_base,
+                    model=self.model,
+                    temperature=temp,
+                    max_tokens=self.max_tokens,
+                    on_debug=(self._log if self._verbose else None),
+                )
+            except Exception as exc:
+                self._log(f"AM: API failure for cand {i+1:04d} at temp {temp:.2f}: {exc}")
+                raise
             title, description_text, scad_code = extract_scad_code(payload)
             scad_code = maybe_postprocess_scad(description, scad_code)
 
@@ -264,6 +292,11 @@ class AdvancedModeler:
 
         # STL export
         cmd_stl = [str(openscad_exe), "-o", str(stl_out), str(cand.source_path)]
+        if self._verbose:
+            try:
+                self._log("AM: OpenSCAD STL: " + subprocess.list2cmdline(cmd_stl))
+            except Exception:
+                pass
         res = subprocess.run(cmd_stl, capture_output=True, text=True)
         if res.returncode != 0:
             # Attempt one syntax-fix retry using compiler errors
@@ -293,6 +326,11 @@ class AdvancedModeler:
             "--projection=p",
             str(cand.source_path),
         ]
+        if self._verbose:
+            try:
+                self._log("AM: OpenSCAD IMG: " + subprocess.list2cmdline(cmd_img_iso))
+            except Exception:
+                pass
         self._run_cmd(cmd_img_iso)
 
         cand.stl_path = stl_out
@@ -435,10 +473,10 @@ class AdvancedModeler:
 
     def _run_cmd(self, cmd: List[str]) -> None:
         proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.stdout:
-            sys.stdout.write(proc.stdout)
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
+        if proc.stdout and self._verbose:
+            self._log(proc.stdout.strip())
+        if proc.stderr and self._verbose:
+            self._log(proc.stderr.strip())
         if proc.returncode != 0:
             raise RuntimeError(f"Command failed: {subprocess.list2cmdline(cmd)} (rc={proc.returncode})")
 

@@ -495,6 +495,9 @@ def resolve_api_key(cfg: dict) -> str:
     )
 
 
+from typing import Callable, Optional
+
+
 def request_scad_from_openai(
     *,
     prompt: str,
@@ -503,9 +506,17 @@ def request_scad_from_openai(
     model: str,
     temperature: float,
     max_tokens: int,
+    on_debug: Optional[Callable[[str], None]] = None,
 ) -> dict:
+    def _dbg(msg: str) -> None:
+        if on_debug:
+            try:
+                on_debug(msg)
+            except Exception:
+                pass
     # Prefer Chat Completions for non-GPT-5; use SDK Responses API for GPT-5 family
     is_gpt5 = _uses_max_completion_tokens(model)
+    _dbg(f"API: request model={model} is_gpt5={is_gpt5} max_tokens={max_tokens}")
     if is_gpt5:
         # SDK path
         client = _openai_client(api_key, api_base)
@@ -524,6 +535,7 @@ def request_scad_from_openai(
 
         try:
             resp = client.responses.create(**kwargs)  # type: ignore[arg-type]
+            _dbg("API: responses.create returned")
         except Exception as exc:
             raise RuntimeError(f"OpenAI API (responses) request failed: {exc}") from exc
 
@@ -533,22 +545,26 @@ def request_scad_from_openai(
             if not content:
                 # Fallback to dict walk
                 d = resp.to_dict()  # type: ignore[attr-defined]
+                _dbg(f"API: responses.to_dict keys={list(d.keys()) if isinstance(d, dict) else type(d)}")
                 content = _responses_aggregate_text(d)
                 if not content:
                     # Write debug payload to inspect response shape
                     try:
                         Path("replicator_api_debug.json").write_text(json.dumps(d, indent=2), encoding="utf-8")
+                        _dbg("API: wrote replicator_api_debug.json for inspection")
                     except Exception:
                         pass
         except Exception:
             content = ""
         if not isinstance(content, str) or not content.strip():
+            _dbg("API: empty content from responses path")
             raise RuntimeError("OpenAI API response did not include text content")
         try:
             return extract_json_object(content)
         except Exception:
             try:
                 Path("replicator_api_raw.txt").write_text(str(content), encoding="utf-8")
+                _dbg("API: wrote replicator_api_raw.txt fallback")
             except Exception:
                 pass
             raise
@@ -588,8 +604,11 @@ def request_scad_from_openai(
     def _do_request(pl: dict) -> dict:
         body = json.dumps(pl).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        _dbg("API: POST chat.completions")
         with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            raw = resp.read().decode("utf-8")
+            _dbg(f"API: HTTP {getattr(resp, 'status', '?')} bytes={len(raw)}")
+            return json.loads(raw)
 
     # First attempt: JSON mode
     try:
@@ -646,6 +665,7 @@ def request_scad_from_openai(
         choice0 = data["choices"][0]
         content = _message_text_from_choice(choice0)
     if not isinstance(content, str) or not content.strip():
+        _dbg("API: empty content from fallback path")
         raise RuntimeError("OpenAI API response did not include text content")
     return extract_json_object(content)
 

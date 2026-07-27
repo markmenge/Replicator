@@ -879,7 +879,7 @@ class ReplicatorApp(tk.Tk):
                     ref_img_raw = str(self.ref_image_path_var.get()).strip()
                     ref_imgs = [Path(ref_img_raw)] if ref_img_raw else None
                     self._log("Advanced Modeling enabled: running iterative candidate generation")
-                    am = AdvancedModeler(self.cfg)
+                    am = AdvancedModeler(self.cfg, logger=lambda m: self._log(m), verbose=bool(self.show_log_details_var.get()))
                     # Light-weight defaults to improve poor rook quality without huge latency
                     bud = Budget(max_iters=2, candidates_per_iter=3, target_score=72.0, beam_width=2)
                     res = am.generate(description=prompt, ref_images=ref_imgs, constraints=Constraints(), budget=bud, engines=Engines())
@@ -943,6 +943,8 @@ class ReplicatorApp(tk.Tk):
                 )
                 self._log("Used offline nameplate mode")
             else:
+                # Attach API debug logging when Show Log Details is enabled
+                api_debug = (lambda s: self._log("API: " + s)) if bool(self.show_log_details_var.get()) else None
                 payload = request_scad_from_openai(
                     prompt=generation_prompt,
                     api_key=resolve_api_key(self.cfg),
@@ -950,6 +952,7 @@ class ReplicatorApp(tk.Tk):
                     model=str(self.cfg["generation"]["model"]),
                     temperature=float(self.cfg["generation"]["temperature"]),
                     max_tokens=int(self.cfg["generation"]["max_tokens"]),
+                    on_debug=api_debug,
                 )
                 title, description, scad_code = extract_scad_code(payload)
 
