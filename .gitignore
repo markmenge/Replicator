@@ -13,8 +13,14 @@ Thumbs.db
 
 # Projects outputs (generated assets)
 projects/**/generated/
+projects/**/generated_advanced/
 projects/**/stl/
 projects/**/gcode/
 
 # Legacy build dir (deprecated)
 build/
+
+# Runtime logs and API debug dumps
+*.log
+replicator_api_*.json
+replicator_api_*.txt

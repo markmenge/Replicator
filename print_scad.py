@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from print_file import DEFAULT_MAINBOARD_ID, PrinterError, normalize_printer_filename, prompt_to_continue as prompt_to_start_print, start_print
@@ -28,6 +29,68 @@ BED_TYPE_LABELS = {
     "4": "Textured PEI Plate",
     "5": "High Temp Plate",
 }
+
+ORCA_SETTING_LABELS = {
+    "machine": "Printer",
+    "machine_model": "Printer Model",
+    "process": "Process",
+    "filament": "Filament",
+}
+
+ORCA_LOADABLE_SETTING_TYPES = {"machine", "machine_model", "process", "filament"}
+
+
+@dataclass(frozen=True)
+class OrcaSettingSelection:
+    selected_path: Path
+    load_paths: tuple[Path, ...]
+
+
+def parse_orca_inherits(value) -> list[str]:
+    if isinstance(value, str):
+        separators = [";", "|", ","]
+        values = [value]
+        for separator in separators:
+            if any(separator in item for item in values):
+                values = [part for item in values for part in item.split(separator)]
+        return [item.strip() for item in values if item.strip()]
+
+    if isinstance(value, list):
+        names: list[str] = []
+        for item in value:
+            names.extend(parse_orca_inherits(item))
+        return names
+
+    return []
+
+
+def dedupe_paths(paths: list[Path]) -> tuple[Path, ...]:
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return tuple(unique)
+
+
+def get_orca_setting_type(path: Path, data: dict | None = None) -> str | None:
+    if data is None:
+        data = read_json_file(path)
+    setting_type = data.get("type")
+    if isinstance(setting_type, str) and setting_type:
+        return setting_type
+
+    path_parts = {part.lower() for part in path.parts}
+    if "machine" in path_parts:
+        return "machine"
+    if "process" in path_parts:
+        return "process"
+    if "filament" in path_parts:
+        return "filament"
+    return None
 
 
 def read_json_file(path: Path) -> dict:
@@ -59,19 +122,187 @@ def run_command(command: list[str], label: str, dry_run: bool) -> None:
         raise RuntimeError(f"{label} failed with exit code {completed.returncode}")
 
 
-def resolve_orca_setting_file(candidate: Path, system_dir: Path) -> Path:
+def preset_namespace_root(path: Path, preset_root: Path) -> Path | None:
+    try:
+        relative = path.resolve().relative_to(preset_root.resolve())
+    except ValueError:
+        return None
+
+    parts = relative.parts
+    for index, part in enumerate(parts):
+        if part.lower() in {"machine", "process", "filament"} and index > 0:
+            return preset_root / Path(*parts[:index + 1])
+    return None
+
+
+def find_inherited_orca_setting_file(
+    inherited_name: str,
+    current_path: Path,
+    user_dir: Path,
+    system_dir: Path,
+) -> Path | None:
+    filename = f"{inherited_name}.json"
+    candidates: list[Path] = []
+
+    same_folder = current_path.parent / filename
+    if same_folder.exists():
+        candidates.append(same_folder)
+
+    for preset_root in (user_dir, system_dir):
+        namespace_root = preset_namespace_root(current_path, preset_root)
+        if namespace_root and namespace_root.exists():
+            candidates.extend(sorted(namespace_root.glob(f"**/{filename}")))
+
+    if user_dir.exists():
+        candidates.extend(sorted(user_dir.glob(f"**/{filename}")))
+    if system_dir.exists():
+        candidates.extend(sorted(system_dir.glob(f"**/{filename}")))
+
+    unique = dedupe_paths(candidates)
+    return unique[0] if unique else None
+
+
+def collect_orca_cli_load_files(
+    path: Path,
+    user_dir: Path,
+    system_dir: Path,
+    seen: set[Path] | None = None,
+) -> tuple[Path, ...]:
+    if seen is None:
+        seen = set()
+
+    current = path.resolve()
+    if current in seen:
+        return ()
+    seen.add(current)
+
+    data = read_json_file(current)
+    load_files: list[Path] = []
+    for inherited_name in parse_orca_inherits(data.get("inherits")):
+        inherited_path = find_inherited_orca_setting_file(inherited_name, current, user_dir, system_dir)
+        if inherited_path is not None:
+            load_files.extend(collect_orca_cli_load_files(inherited_path, user_dir, system_dir, seen))
+
+    if data.get("type") in ORCA_LOADABLE_SETTING_TYPES:
+        load_files.append(current)
+    elif not load_files:
+        load_files.append(current)
+
+    return dedupe_paths(load_files)
+
+
+def resolve_orca_setting_files(candidate: Path, user_dir: Path, system_dir: Path) -> tuple[Path, ...]:
     data = read_json_file(candidate)
-    if data.get("type") in {"machine", "machine_model", "process", "filament"}:
-        return candidate
+    setting_type = get_orca_setting_type(candidate, data)
+    if setting_type == "filament":
+        return collect_orca_cli_load_files(candidate, user_dir, system_dir)
 
-    inherits = data.get("inherits")
-    if not isinstance(inherits, str) or not inherits:
-        return candidate
+    if data.get("type") in ORCA_LOADABLE_SETTING_TYPES:
+        return (candidate,)
 
-    matches = sorted(system_dir.glob(f"**/{inherits}.json"))
-    if matches:
-        return matches[0]
-    return candidate
+    inherited_files: list[Path] = []
+    for inherited_name in parse_orca_inherits(data.get("inherits")):
+        inherited_path = find_inherited_orca_setting_file(inherited_name, candidate, user_dir, system_dir)
+        if inherited_path is not None:
+            inherited_files.extend(resolve_orca_setting_files(inherited_path, user_dir, system_dir))
+    if inherited_files:
+        return dedupe_paths(inherited_files)
+
+    return (candidate,)
+
+
+def make_orca_setting_selection(candidate: Path, user_dir: Path, system_dir: Path) -> OrcaSettingSelection:
+    return OrcaSettingSelection(
+        selected_path=candidate,
+        load_paths=resolve_orca_setting_files(candidate, user_dir, system_dir),
+    )
+
+
+def get_orca_ancestor_chain(
+    path: Path,
+    user_dir: Path,
+    system_dir: Path,
+    seen: set[Path] | None = None,
+) -> list[Path]:
+    if seen is None:
+        seen = set()
+
+    current = path.resolve()
+    if current in seen:
+        return []
+    seen.add(current)
+
+    data = read_json_file(current)
+    ancestors: list[Path] = []
+    for inherited_name in parse_orca_inherits(data.get("inherits")):
+        inherited_path = find_inherited_orca_setting_file(inherited_name, current, user_dir, system_dir)
+        if inherited_path is None:
+            continue
+        inherited_path = inherited_path.resolve()
+        ancestors.append(inherited_path)
+        ancestors.extend(get_orca_ancestor_chain(inherited_path, user_dir, system_dir, seen))
+    return ancestors
+
+
+def describe_orca_setting_file(path: Path) -> tuple[str, str, str | None]:
+    data = read_json_file(path)
+    setting_type = get_orca_setting_type(path, data)
+
+    label = ORCA_SETTING_LABELS.get(str(setting_type), "Setting")
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip():
+        name = path.stem
+    inherited_names = parse_orca_inherits(data.get("inherits"))
+    inherits = "; ".join(inherited_names) if inherited_names else None
+    return label, name, inherits
+
+
+def print_orca_setting_selection(setting: OrcaSettingSelection, user_dir: Path, system_dir: Path, indent: str = "  ") -> None:
+    label, name, inherits = describe_orca_setting_file(setting.selected_path)
+    print(f"{indent}{label}: {name}")
+    if inherits:
+        print(f"{indent}  inherits: {inherits}")
+    print(f"{indent}  selected file: {setting.selected_path}")
+    if setting.load_paths != (setting.selected_path,):
+        for load_path in setting.load_paths:
+            print(f"{indent}  CLI load file: {load_path}")
+
+    ancestors = get_orca_ancestor_chain(setting.selected_path, user_dir, system_dir)
+    if ancestors:
+        print(f"{indent}  ancestor chain:")
+        for index, ancestor in enumerate(ancestors, start=1):
+            _ancestor_label, ancestor_name, ancestor_inherits = describe_orca_setting_file(ancestor)
+            suffix = f" (inherits: {ancestor_inherits})" if ancestor_inherits else ""
+            print(f"{indent}    {index}. {ancestor_name}{suffix}")
+            print(f"{indent}       file: {ancestor}")
+
+
+def safe_setting_filename(value: str) -> str:
+    safe = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in value.strip())
+    return safe.strip("._") or "setting"
+
+
+def write_effective_filament_setting(load_paths: tuple[Path, ...], output_dir: Path) -> Path:
+    if not load_paths:
+        raise RuntimeError("Cannot build an effective filament setting without input files")
+
+    merged: dict = {}
+    for path in load_paths:
+        merged.update(read_json_file(path))
+
+    selected = read_json_file(load_paths[-1])
+    selected_name = selected.get("name")
+    if not isinstance(selected_name, str) or not selected_name.strip():
+        selected_name = load_paths[-1].stem
+
+    merged["type"] = "filament"
+    merged["name"] = selected_name
+    merged.pop("inherits", None)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    effective_path = output_dir / f"{safe_setting_filename(selected_name)}.effective.filament.json"
+    effective_path.write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
+    return effective_path
 
 
 def find_orca_preset_by_name(name: str, user_dir: Path, system_dir: Path) -> Path | None:
@@ -90,15 +321,15 @@ def find_orca_preset_by_name(name: str, user_dir: Path, system_dir: Path) -> Pat
     return None
 
 
-def resolve_filament_setting_file(value: str, user_dir: Path, system_dir: Path) -> Path:
+def resolve_filament_setting_file(value: str, user_dir: Path, system_dir: Path) -> OrcaSettingSelection:
     candidate = Path(value)
     if candidate.exists():
-        return resolve_orca_setting_file(candidate.resolve(), system_dir)
+        return make_orca_setting_selection(candidate.resolve(), user_dir, system_dir)
 
     match = find_orca_preset_by_name(value, user_dir, system_dir)
     if match is None:
         raise FileNotFoundError(f"Filament preset not found by path or name: {value}")
-    return resolve_orca_setting_file(match, system_dir)
+    return make_orca_setting_selection(match.resolve(), user_dir, system_dir)
 
 
 def read_orca_conf(path: Path) -> dict:
@@ -128,7 +359,7 @@ def get_active_orca_profile(conf_data: dict) -> dict:
     return fallback
 
 
-def auto_detect_orca_setting_files(conf_path: Path, user_dir: Path, system_dir: Path) -> tuple[list[Path], str | None]:
+def auto_detect_orca_setting_files(conf_path: Path, user_dir: Path, system_dir: Path) -> tuple[list[OrcaSettingSelection], str | None]:
     ensure_exists(conf_path, "OrcaSlicer config")
     conf_data = read_orca_conf(conf_path)
     active_profile = get_active_orca_profile(conf_data)
@@ -152,8 +383,8 @@ def auto_detect_orca_setting_files(conf_path: Path, user_dir: Path, system_dir: 
     if process_match is None:
         raise FileNotFoundError(f"Process preset not found by name: {process_name}")
 
-    machine_setting = resolve_orca_setting_file(machine_match.resolve(), system_dir)
-    process_setting = resolve_orca_setting_file(process_match.resolve(), system_dir)
+    machine_setting = make_orca_setting_selection(machine_match.resolve(), user_dir, system_dir)
+    process_setting = make_orca_setting_selection(process_match.resolve(), user_dir, system_dir)
     filament_setting = resolve_filament_setting_file(filament_name, user_dir, system_dir)
 
     bed_type_raw = active_profile.get("curr_bed_type", conf_data.get("app", {}).get("curr_bed_type"))
@@ -201,13 +432,30 @@ def build_orca_command(
     orca_exe: Path,
     stl_path: Path,
     gcode_path: Path,
-    slicer_settings: list[Path],
+    slicer_settings: list[OrcaSettingSelection],
     extra_args: list[str],
 ) -> list[str]:
     ensure_exists(orca_exe, "OrcaSlicer executable")
     command = [str(orca_exe), "--slice", "0"]
     if slicer_settings:
-        command.extend(["--load-settings", ";".join(str(path) for path in slicer_settings)])
+        load_settings: list[str] = []
+        load_filaments: list[str] = []
+        for setting in slicer_settings:
+            if get_orca_setting_type(setting.selected_path) == "filament":
+                effective_filament = write_effective_filament_setting(setting.load_paths, gcode_path.parent)
+                load_filaments.append(str(effective_filament))
+                continue
+
+            for path in setting.load_paths:
+                if get_orca_setting_type(path) == "filament":
+                    load_filaments.append(str(path))
+                else:
+                    load_settings.append(str(path))
+        if load_settings:
+            command.extend(["--load-settings", ";".join(load_settings)])
+        if load_filaments:
+            command.extend(["--load-filaments", ";".join(load_filaments)])
+            command.append("--load-defaultfila")
     command.extend(["--outputdir", str(gcode_path.parent)])
     command.extend(extra_args)
     command.append(str(stl_path))
@@ -218,12 +466,14 @@ def slice_stl(
     stl_path: Path,
     gcode_path: Path,
     orca_exe: Path,
-    slicer_settings: list[Path],
+    slicer_settings: list[OrcaSettingSelection],
     extra_args: list[str],
     dry_run: bool,
 ) -> None:
     command = build_orca_command(orca_exe, stl_path, gcode_path, slicer_settings, extra_args)
     gcode_path.parent.mkdir(parents=True, exist_ok=True)
+    if not dry_run and gcode_path.exists():
+        gcode_path.unlink()
     run_command(command, "OrcaSlicer", dry_run)
     if dry_run:
         return
@@ -345,7 +595,7 @@ def main() -> int:
     orca_conf_path = Path(args.orca_conf).resolve()
     orca_user_dir = Path(args.orca_user_dir).resolve()
     orca_system_dir = Path(args.orca_system_dir).resolve()
-    slicer_settings = [Path(setting).resolve() for setting in args.slicer_setting]
+    slicer_settings = [make_orca_setting_selection(Path(setting).resolve(), orca_user_dir, orca_system_dir) for setting in args.slicer_setting]
     detected_bed_type: str | None = None
     used_auto_detect = not slicer_settings
     if used_auto_detect:
@@ -353,7 +603,7 @@ def main() -> int:
         if slicer_settings:
             print(f"Auto-detected OrcaSlicer settings from {orca_conf_path}:")
             for setting in slicer_settings:
-                print(f"  {setting}")
+                print_orca_setting_selection(setting, orca_user_dir, orca_system_dir)
             if detected_bed_type:
                 print(f"  Bed type: {detected_bed_type}")
         else:
@@ -363,10 +613,10 @@ def main() -> int:
         filament_setting = resolve_filament_setting_file(args.filament_preset, orca_user_dir, orca_system_dir)
         slicer_settings = [
             setting for setting in slicer_settings
-            if read_json_file(setting).get("type") != "filament"
+            if all(read_json_file(load_path).get("type") != "filament" for load_path in setting.load_paths)
         ]
         slicer_settings.append(filament_setting)
-        print(f"Using filament preset: {filament_setting}")
+        print_orca_setting_selection(filament_setting, orca_user_dir, orca_system_dir, indent="")
 
     orca_args = list(args.orca_arg)
     if used_auto_detect and detected_bed_type and "--curr-bed-type" not in orca_args:
